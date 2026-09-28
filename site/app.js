@@ -2,6 +2,7 @@
 // พยากรณ์อากาศและน้ำท่าเรียกจาก Open-Meteo โดยตรง (ฟรี ไม่ต้องใช้ key)
 
 import { REPORT_CSS, reportToPng, reportToPdf, deliverFile } from "./report.js";
+import { assessRisk, riskLevel, anomalyLevel, anomalyText, RISK_LEVELS } from "./risk.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -238,6 +239,17 @@ async function summaryData() {
     if (heavy.length) push(`มีฝนหนัก (>35 มม.) ใน <b>${heavy.length}</b> จังหวัด เช่น ${heavy.sort((a, b) => b[1].max - a[1].max).slice(0, 4).map(([p, x]) => `${provName(p)} ${fmt(x.max)} มม.`).join(", ")}`, "high");
     else push("ไม่มีจังหวัดที่ฝนหนักเกิน 35 มม. ใน 24 ชม. ที่ผ่านมา", "normal");
   }
+  if (S.risk?.prov) {
+    if (S.prov) {
+      const r = S.risk.prov[S.prov];
+      if (r) { const l = riskLevel(r.score); push(`ความเสี่ยงจากฝนสะสม: <b>${r.score}/100 (${l.label})</b> — ${riskReason(r)}`, l.color); }
+    } else {
+      const all = Object.entries(S.risk.prov).map(([p, r]) => ({ p, ...r }));
+      const hi = all.filter((r) => r.score >= 40).sort((a, b) => b.score - a.score);
+      const onset = all.filter((r) => r.onset);
+      push(hi.length ? `ความเสี่ยงจากฝนสะสมสูง <b>${hi.length}</b> จังหวัด: ${hi.slice(0, 4).map((r) => `${provName(r.p)} (${r.score})`).join(", ")}${onset.length ? ` · ฝนหนักฉับพลันในพื้นที่ที่ปกติไม่หนัก: ${onset.slice(0, 3).map((r) => provName(r.p)).join(", ")}` : ""}` : `ไม่มีจังหวัดที่ความเสี่ยงจากฝนสะสมถึงระดับสูง${onset.length ? ` · แต่จับตาฝนหนักฉับพลัน: ${onset.slice(0, 3).map((r) => provName(r.p)).join(", ")}` : ""}`, hi.length ? "high" : onset.length ? "low" : "normal");
+    }
+  }
   return { rv, dm, counts, kpis, notes };
 }
 
@@ -280,6 +292,201 @@ function provinceRanking(limit = 15, clickable = true) {
   return `<table class="t"><thead><tr><th>จังหวัด</th><th>ล้นตลิ่ง</th><th>น้ำมาก</th><th>ฝนสูงสุด</th><th>เขื่อน</th></tr></thead><tbody>
     ${list.map((r) => `<tr class="click" data-prov="${r.p}"><td>${esc(provName(r.p))}</td><td class="${r.over ? "up" : ""}">${r.over || "–"}</td><td>${r.high || "–"}</td><td>${r.rain ? fmt(r.rain) : "–"}</td><td>${r.dam === null ? "–" : fmt(r.dam) + "%"}</td></tr>`).join("")}
   </tbody></table><div class="note">${clickable ? "แตะชื่อจังหวัดเพื่อดูรายละเอียด · " : ""}เรียงตามคะแนนรวมจากระดับน้ำ ฝน และเขื่อน</div>`;
+}
+
+// ---------------------------------------------------------------- แท็บ: ความเสี่ยงจากฝนสะสม
+const FACTORS = [
+  { k: "event", w: 30, label: "ฝนสะสม 7 วัน (ผ่านมา 4 + ข้างหน้า 3) เทียบค่าปกติ" },
+  { k: "future", w: 20, label: "ฝนคาดการณ์ 3 วันข้างหน้า เทียบค่าปกติ" },
+  { k: "soil", w: 15, label: "ดินชุ่มน้ำจากฝนสะสมก่อนหน้า (API)" },
+  { k: "intensity", w: 10, label: "ความแรงของฝนรายวัน (พยากรณ์/สถานีวัดจริง)" },
+  { k: "persist", w: 10, label: "ฝนหนักต่อเนื่องหลายวัน" },
+  { k: "river", w: 15, label: "ระดับน้ำในแม่น้ำของจังหวัด" },
+];
+const RISK_SORTS = [
+  { k: "score", label: "ความเสี่ยงรวม" },
+  { k: "anomaly", label: "ผิดปกติที่สุด" },
+  { k: "ahead", label: "เตือนล่วงหน้า" },
+  { k: "persist", label: "ฝนต่อเนื่อง" },
+];
+S.riskSort = "score";
+S.clim = null;
+S.distRisk = {};
+
+const riskPill = (r) => { const l = riskLevel(r.score); return `<span class="pill" style="--c:var(--${l.color})">${l.label}</span>`; };
+const anomPill = (p) => { const a = anomalyLevel(p); return a.key === "normal" ? "" : `<span class="pill" style="--c:var(--${a.key === "above" ? "low" : a.key === "very" ? "high" : "over"})">${a.label}</span>`; };
+const inDaysText = (n) => (n === 0 ? "วันนี้" : n === 1 ? "พรุ่งนี้" : `อีก ${n} วัน`);
+
+function riskReason(r) {
+  const parts = [];
+  if (r.onset) parts.push("⚠ เปลี่ยนจากแห้งเป็นฝนหนักฉับพลัน");
+  parts.push(`ฝน 7 วัน ${fmt(r.v.event7)} มม.`);
+  if ((r.pct.event7 ?? 0) >= 90 || (r.pct.f3 ?? 0) >= 90) parts.push(anomalyText(r.anomaly));
+  if (r.run?.len >= 2) parts.push(`ฝนหนักต่อเนื่อง ${r.run.len} วัน`);
+  if (r.firstHeavy && r.firstHeavy.inDays > 0) parts.push(`ฝนหนัก${inDaysText(r.firstHeavy.inDays)}`);
+  if (r.nModels) parts.push(`โมเดลตรงกัน ${r.agree}/${r.nModels}`);
+  return parts.join(" · ");
+}
+
+function riskBanner() {
+  const R = S.risk;
+  if (!R) return `<div class="card empty">ยังไม่มีผลประเมินความเสี่ยง<br><span class="small">ระบบจะคำนวณในการอัปเดตรอบถัดไป (ทุก ~3 ชม.)</span></div>`;
+  let h = `<div class="small muted" style="margin-bottom:8px">ประเมินเมื่อ ${thTime(R.updated)} น. (${ago(R.updated)})${R.stale ? " · ⚠ รอบล่าสุดคำนวณไม่สำเร็จ ใช้ผลเดิม" : ""}</div>`;
+  if (R.climDone < R.climTotal) h += `<div class="banner">กำลังสร้างค่าปกติย้อนหลัง ${R.climDone}/${R.climTotal} จังหวัด (ทยอยดึงเพื่อไม่ให้เกินโควตาฟรี ครบใน 2–3 วัน) · จังหวัดที่ยังไม่มีค่าปกติใช้เกณฑ์ทั่วไปแทน การจัดอันดับ "ผิดปกติ" จะแม่นขึ้นเมื่อครบ</div>`;
+  return h;
+}
+
+async function viewRisk() {
+  if (!S.risk) { $("#view").innerHTML = riskBanner(); return; }
+  if (S.prov) return viewRiskProvince();
+  const all = Object.entries(S.risk.prov).map(([p, r]) => ({ p: +p, ...r }));
+  const cnt = (k) => all.filter((r) => r.level === k).length;
+  let list;
+  if (S.riskSort === "anomaly") list = all.filter((r) => (r.anomaly ?? 0) >= 75).sort((a, b) => b.anomaly - a.anomaly);
+  else if (S.riskSort === "ahead") list = all.filter((r) => r.onset || (r.firstHeavy && r.firstHeavy.inDays >= 1) || (r.pct.f3 ?? 0) >= 90).sort((a, b) => (b.onset - a.onset) || (b.pct.f3 ?? 0) - (a.pct.f3 ?? 0));
+  else if (S.riskSort === "persist") list = all.filter((r) => r.run?.len >= 2).sort((a, b) => b.run.len - a.run.len || b.score - a.score);
+  else list = all.filter((r) => r.score >= 10).sort((a, b) => b.score - a.score);
+
+  const desc = {
+    score: "รวมทุกปัจจัย: ฝนสะสม ฝนข้างหน้า ดินชุ่มน้ำ ความแรง ความต่อเนื่อง และระดับน้ำ",
+    anomaly: "เรียงตาม \"ผิดจากปกติของพื้นที่นั้นในช่วงเดียวกันของปี\" — จังหวัดที่ปกติฝนน้อยแต่ตอนนี้ฝนมากจะขึ้นมาก่อน แม้ปริมาณไม่สูงที่สุดในประเทศ",
+    ahead: "จังหวัดที่ยังไม่มีฝนหนักหรือเพิ่งเริ่ม แต่พยากรณ์ 1–7 วันข้างหน้าสูงผิดปกติ — ใช้เตรียมการล่วงหน้า",
+    persist: "จังหวัดที่ฝนหนักเกินเกณฑ์ของพื้นที่ติดต่อกันตั้งแต่ 2 วันขึ้นไป (รวมที่ตกแล้วและคาดการณ์)",
+  }[S.riskSort];
+
+  let h = riskBanner() + `<div class="kpis">
+    <div class="kpi ${cnt("vhigh") ? "alert" : ""}"><div class="v">${cnt("vhigh")}</div><div class="l">จังหวัดเสี่ยงสูงมาก</div></div>
+    <div class="kpi"><div class="v">${cnt("high")}</div><div class="l">จังหวัดเสี่ยงสูง</div></div>
+    <div class="kpi"><div class="v">${cnt("watch")}</div><div class="l">จังหวัดเฝ้าระวัง</div></div>
+    <div class="kpi"><div class="v">${all.filter((r) => (r.anomaly ?? 0) >= 95).length}</div><div class="l">จังหวัดฝนผิดปกติ (สูงสุด 5%)</div></div>
+  </div>
+  <div class="chips" style="margin-top:12px">${RISK_SORTS.map((x) => `<button class="chip" data-rsort="${x.k}" aria-pressed="${S.riskSort === x.k}">${x.label}</button>`).join("")}</div>
+  <div class="small muted" style="margin-bottom:8px">${desc}</div>
+  <div class="card">`;
+  if (!list.length) h += `<div class="empty">ไม่มีจังหวัดที่เข้าเกณฑ์</div>`;
+  list.slice(0, 40).forEach((r, i) => {
+    const l = riskLevel(r.score);
+    const val = S.riskSort === "anomaly" ? `<b>${r.anomaly > 100 ? "เกินสถิติ" : `P${fmt(r.anomaly)}`}</b>` : S.riskSort === "persist" ? `<b>${r.run.len} วัน</b>` : S.riskSort === "ahead" ? `<b>${r.firstHeavy ? inDaysText(r.firstHeavy.inDays) : `P${fmt(r.pct.f3)}`}</b>` : `<b>${r.score}</b>`;
+    h += `<div class="row" data-prov="${r.p}">
+      <div class="rank">${i + 1}</div>
+      <div class="main"><div class="name">${esc(provName(r.p))} ${riskPill(r)}</div>
+        <div class="sub wrap">${riskReason(r)}</div>
+        <div class="bar" style="--c:var(--${l.color})"><span style="width:${r.score}%"></span></div></div>
+      <div class="val">${val}</div>
+    </div>`;
+  });
+  h += `</div>` + riskMethod();
+  $("#view").innerHTML = h;
+}
+
+function riskMethod() {
+  const yrs = S.risk?.climYears ? `${S.risk.climYears[0]}–${S.risk.climYears[1]}` : "10 ปี";
+  return `<details class="card method"><summary><b>วิธีคิดความเสี่ยงและความผิดปกติ</b></summary>
+    <p><b>1. ค่าปกติของแต่ละพื้นที่</b> — ใช้ข้อมูลฝนรายวันย้อนหลัง (ERA5 ปี ${yrs}) ของจุดกลางแต่ละจังหวัด คำนวณว่า "ช่วงเดียวกันของปี" (±15 วัน) ฝน 1, 3, 7 วันมักอยู่ที่เท่าไร เก็บเป็นเปอร์เซ็นไทล์ P50/P75/P90/P95/P99/สูงสุด</p>
+    <p><b>2. ความผิดปกติ</b> — เทียบฝนปัจจุบัน+คาดการณ์กับค่าปกตินั้น เช่น P97 = มากกว่า 97% ของช่วงเดียวกันในอดีต จึงจับได้ว่า "จังหวัดที่ปกติฝนไม่หนักในช่วงนี้ แต่กำลังมีฝนหนัก" แม้ปริมาณจะน้อยกว่าภาคใต้หรือภาคตะวันออก</p>
+    <p><b>3. ดินชุ่มน้ำ (API)</b> — ดัชนีฝนสะสม = ฝนวันนี้ + 0.9 × ค่าของเมื่อวาน ฝนที่ตกต่อเนื่องหลายวันทำให้ดินอุ้มน้ำไม่ไหว ฝนก้อนถัดไปจะกลายเป็นน้ำท่า/น้ำป่าได้เร็ว</p>
+    <p><b>4. ความต่อเนื่อง</b> — นับวันที่ฝนเกิน P90 รายวันของพื้นที่ (ไม่ต่ำกว่า 20 มม.) ติดต่อกัน ทั้งที่ตกแล้วและคาดการณ์</p>
+    <p><b>5. เตือนล่วงหน้า</b> — ใช้พยากรณ์ 3 โมเดล (ECMWF, GFS, ICON) ถ้าหลายโมเดลให้ฝน 3 วันข้างหน้าเกิน P90 ของพื้นที่พร้อมกัน ความเชื่อมั่นสูงขึ้น และถ้า 7 วันที่ผ่านมาปกติแต่ข้างหน้าผิดปกติมาก จะติดธง "เปลี่ยนฉับพลัน"</p>
+    <p><b>6. คะแนนรวม 0–100</b> — ${FACTORS.map((f) => `${f.label} ${f.w}%`).join(" · ")} · ความผิดปกติจะถูกลดน้ำหนักเมื่อปริมาณฝนจริงยังน้อย (กันหน้าแล้งที่ฝน 10 มม. ก็ผิดปกติแล้ว) · ระดับ: ≥60 เสี่ยงสูงมาก, ≥40 เสี่ยงสูง, ≥25 เฝ้าระวัง</p>
+    <p class="muted"><b>ข้อจำกัด</b> — ใช้จุดกลางจังหวัดเป็นตัวแทน ฝนเฉพาะจุดบางอำเภออาจไม่สะท้อน (ดูรายอำเภอในหน้าจังหวัด) · ข้อมูลย้อนหลัง ERA5 มักต่ำกว่าฝนสุดขั้วจริง จึงดูเป็น "อันดับเทียบกัน" ได้ดีกว่าเป็นตัวเลขแน่นอน · คะแนนเป็นดัชนีช่วยจัดลำดับความสนใจ ไม่ใช่ประกาศเตือนภัยทางการ ควรดูประกาศกรมอุตุนิยมวิทยาและ ปภ. ประกอบ</p>
+  </details>`;
+}
+
+function riskChart(r) {
+  const se = r.series;
+  if (!se) return "";
+  const names = Object.keys(se.m);
+  const n = se.m[names[0]].length;
+  const med = Array.from({ length: n }, (_, i) => {
+    const v = names.map((m) => se.m[m][i]).filter((x) => x !== null).sort((a, b) => a - b);
+    return v.length ? v[Math.floor((v.length - 1) / 2)] : null;
+  });
+  const hi = Array.from({ length: n }, (_, i) => Math.max(0, ...names.map((m) => se.m[m][i] ?? 0)));
+  const W = 340, H = 170, L = 30, R = 4, T = 18, B = 20;
+  const top = Math.max(r.run?.th ?? 30, ...hi, 20) * 1.1;
+  const gw = (W - L - R) / n, bw = Math.max(3, gw - 3);
+  const y = (v) => T + (1 - v / top) * (H - T - B);
+  let g = "";
+  for (const v of [0, top / 3, (2 * top) / 3]) g += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 4}" y="${y(v) + 3}" text-anchor="end">${fmt(v)}</text>`;
+  const x0 = L + se.today * gw;
+  g += `<rect x="${x0}" y="${T - 12}" width="${W - R - x0}" height="${H - B - T + 12}" fill="var(--accent)" opacity=".06"/>`;
+  g += `<text x="${x0 + 3}" y="${T - 3}" style="fill:var(--accent)">พยากรณ์ →</text>`;
+  const start = Date.parse(se.start + "T00:00:00+07:00");
+  med.forEach((v, i) => {
+    const future = i >= se.today;
+    if (future && hi[i] > (v ?? 0)) g += `<rect x="${L + i * gw + 1.5}" y="${y(hi[i])}" width="${bw}" height="${y(0) - y(hi[i])}" rx="1.5" fill="var(--accent)" opacity=".22"><title>สูงสุดของ 3 โมเดล ${fmt(hi[i], 1)} มม.</title></rect>`;
+    if (v !== null) g += `<rect x="${L + i * gw + 1.5}" y="${y(v)}" width="${bw}" height="${Math.max(v > 0 ? 1.5 : 0, y(0) - y(v))}" rx="1.5" fill="${v >= (r.run?.th ?? r.norm.d1p90 ?? 30) ? "var(--over)" : future ? "var(--accent)" : "var(--muted)"}"><title>${fmt(v, 1)} มม.</title></rect>`;
+    const d = new Date(start + i * 864e5 + 7 * HOUR);
+    if (i % 3 === se.today % 3) g += `<text x="${L + i * gw + gw / 2}" y="${H - 5}" text-anchor="middle">${i === se.today ? "วันนี้" : d.getUTCDate()}</text>`;
+  });
+  const th = Math.max(20, r.norm.d1p90 ?? 30);
+  g += `<line x1="${L}" x2="${W - R}" y1="${y(th)}" y2="${y(th)}" stroke="var(--over)" stroke-dasharray="3 3" opacity=".7"/><text x="${L + 2}" y="${y(th) - 3}" style="fill:var(--over)">เกณฑ์ฝนหนักของพื้นที่ ${fmt(th)} มม.</text>`;
+  g += `<text x="${L - 4}" y="9" text-anchor="end">มม.</text>`;
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img">${g}</svg>
+    <div class="chart-legend"><span><i style="background:var(--muted)"></i>ที่ตกแล้ว (ค่ากลางโมเดล)</span><span><i style="background:var(--accent)"></i>คาดการณ์</span><span><i style="background:var(--accent);opacity:.3"></i>กรณีสูงสุดของ 3 โมเดล</span><span><i style="background:var(--over)"></i>เกินเกณฑ์ฝนหนัก</span></div>`;
+}
+
+function riskFindings(r) {
+  const L = [];
+  const add = (text, key) => L.push(`<li style="--sev:var(--${key})">${text}</li>`);
+  if (r.onset) add(`<b>เปลี่ยนจากแห้งเป็นฝนหนักฉับพลัน</b> — 7 วันที่ผ่านมาฝน ${fmt(r.v.past7)} มม. (ปกติ) แต่ 3 วันข้างหน้าคาด ${fmt(r.v.f3)} มม. ซึ่ง${anomalyText(r.pct.f3)}`, "over");
+  add(`ฝนสะสม 7 วัน (4 วันที่ผ่านมา + 3 วันข้างหน้า) <b>${fmt(r.v.event7)} มม.</b> — ${anomalyText(r.pct.event7)}`, (r.pct.event7 ?? 0) >= 95 ? "over" : (r.pct.event7 ?? 0) >= 90 ? "high" : "normal");
+  if (r.firstHeavy) add(`ฝนหนักเกินเกณฑ์ของพื้นที่ครั้งถัดไป: <b>${inDaysText(r.firstHeavy.inDays)}</b> (${dayLabel(r.firstHeavy.date)} ~${fmt(r.firstHeavy.mm)} มม.)`, r.firstHeavy.inDays <= 1 ? "high" : "low");
+  if (r.run?.len >= 2) add(`<b>ฝนหนักต่อเนื่อง ${r.run.len} วัน</b> (${dayLabel(r.run.start)}–${dayLabel(r.run.end)}) เกณฑ์ ≥ ${fmt(r.run.th)} มม./วัน`, r.run.len >= 3 ? "over" : "high");
+  add(`ดินชุ่มน้ำ (ฝนสะสมถ่วงน้ำหนัก) ${fmt(r.v.api)} — ${(r.pct.api ?? 0) >= 90 ? "<b>ชุ่มกว่าปกติมาก</b> ฝนที่ตกเพิ่มจะไหลบ่าเร็ว" : (r.pct.api ?? 0) >= 75 ? "ชุ่มกว่าปกติ" : "ใกล้เคียงหรือต่ำกว่าปกติ"}`, (r.pct.api ?? 0) >= 90 ? "high" : "normal");
+  add(`ความเชื่อมั่นของพยากรณ์: โมเดลที่ให้ฝน 3 วันเกินระดับ P90 ของพื้นที่ <b>${r.agree}/${r.nModels}</b>${r.agree >= 2 ? " — ค่อนข้างแน่นอน" : r.agree === 1 ? " — มีโมเดลเดียว ติดตามรอบถัดไป" : ""}`, r.agree >= 2 ? "high" : "accent");
+  if (r.v.stationMax !== null && r.v.stationMax !== undefined) add(`สถานีวัดจริงในจังหวัด: ฝนสูงสุด 24 ชม. ${fmt(r.v.stationMax, 1)} มม.`, r.v.stationMax > 90 ? "over" : r.v.stationMax > 35 ? "high" : "normal");
+  if (!r.fallback) add(`<span class="muted">บริบทของพื้นที่: ช่วงนี้ของปีฝน 3 วันเกิน ${fmt(r.norm.d3p90)} มม. มีเพียง 10% ของเวลา · ฝน 7 วันโดยทั่วไป ~${fmt(r.norm.d7p50)} มม.${r.norm.heavyDays !== null ? ` · วันที่ฝน ≥35 มม. ปกติมีเพียง ${fmt(r.norm.heavyDays, 1)} วันในช่วงนี้ของแต่ละปี` : ""}</span>`, "accent");
+  else add(`<span class="muted">ยังไม่มีค่าปกติของจังหวัดนี้ ใช้เกณฑ์ทั่วไปของฤดูฝนแทน (ความผิดปกติจะแม่นขึ้นเมื่อสร้างค่าปกติเสร็จ)</span>`, "low");
+  return `<ul class="insights">${L.join("")}</ul>`;
+}
+
+async function viewRiskProvince() {
+  const r = S.risk.prov[S.prov];
+  if (!r) { $("#view").innerHTML = riskBanner() + `<div class="card empty">ไม่มีผลประเมินของจังหวัดนี้</div>`; return; }
+  const l = riskLevel(r.score);
+  const all = Object.values(S.risk.prov).map((x) => x.score).sort((a, b) => b - a);
+  const rank = all.indexOf(r.score) + 1;
+  let h = riskBanner() + `<div class="card risk-hero" style="--c:var(--${l.color})">
+      <div class="score"><b>${r.score}</b><span>/100</span></div>
+      <div><div class="lvl">${l.label}</div>
+        <div class="small muted">อันดับ ${rank} จาก ${all.length} จังหวัด · ${anomPill(r.anomaly) || "ฝนอยู่ในเกณฑ์ปกติของพื้นที่"}</div></div>
+    </div>
+    <h2>สิ่งที่พบ</h2><div class="card">${riskFindings(r)}</div>
+    <h2>ฝนรายวัน 14 วันที่ผ่านมา + 7 วันข้างหน้า</h2><div class="card">${riskChart(r)}</div>
+    <h2>ที่มาของคะแนน</h2><div class="card">${FACTORS.map((f) => `<div class="factor"><div class="fl"><span>${f.label}</span><b>${Math.round(r.s[f.k] * f.w)}/${f.w}</b></div><div class="bar" style="--c:var(--${r.s[f.k] >= 0.66 ? "over" : r.s[f.k] >= 0.33 ? "high" : "accent"})"><span style="width:${r.s[f.k] * 100}%"></span></div></div>`).join("")}</div>
+    <h2>รายอำเภอ</h2><div class="card" id="dist-risk"><div class="loading small">กำลังประเมินรายอำเภอ…</div></div>
+    ${riskMethod()}`;
+  $("#view").innerHTML = h;
+  districtRisk(S.prov).then((rows) => {
+    const el = $("#dist-risk"); if (!el) return;
+    el.innerHTML = rows.length ? `<table class="t nowrap"><thead><tr><th>${S.prov === 10 ? "เขต" : "อำเภอ"}</th><th>คะแนน</th><th>ฝน 3 วันข้างหน้า</th><th>ผิดปกติ</th><th>ฝนหนักครั้งถัดไป</th></tr></thead><tbody>
+      ${rows.map((d) => `<tr class="click" data-dist="${esc(d.name)}"><td>${esc(d.name)}</td><td><span class="dotc" style="background:var(--${riskLevel(d.r.score).color})"></span>${d.r.score}</td><td>${fmt(d.r.v.f3)} มม.</td><td>${d.r.anomaly > 100 ? "เกินสถิติ" : `P${fmt(d.r.anomaly)}`}</td><td>${d.r.firstHeavy ? inDaysText(d.r.firstHeavy.inDays) : "–"}</td></tr>`).join("")}
+      </tbody></table><div class="note">เทียบกับค่าปกติของจังหวัด · ไม่รวมปัจจัยแม่น้ำ · แตะชื่อเพื่อดูพยากรณ์รายชั่วโมงของอำเภอนั้น</div>` : `<div class="empty small">ไม่มีข้อมูลรายอำเภอ</div>`;
+  }).catch(() => { const el = $("#dist-risk"); if (el) el.innerHTML = `<div class="empty small">ประเมินรายอำเภอไม่สำเร็จ</div>`; });
+}
+
+async function districtRisk(prov) {
+  const c = S.distRisk[prov];
+  if (c && Date.now() - c.at < 60 * 60e3) return c.rows;
+  const list = S.districts[prov] || [];
+  if (!list.length) return [];
+  S.clim ??= await getJSON("data/climatology.json").catch(() => ({ prov: {} }));
+  const clim = S.clim.prov?.[prov] ?? null;
+  const ids = MODELS.map((m) => m.id);
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${list.map((d) => d[1]).join(",")}&longitude=${list.map((d) => d[2]).join(",")}&daily=precipitation_sum&models=${ids.join(",")}&past_days=21&forecast_days=8&timezone=Asia%2FBangkok`;
+  const res = await getJSON(url, { cache: "default" });
+  const arr = Array.isArray(res) ? res : [res];
+  const todayIso = new Date(Date.now() + 7 * HOUR).toISOString().slice(0, 10);
+  const rows = list.map((d, i) => {
+    const dd = arr[i]?.daily;
+    if (!dd) return null;
+    const models = Object.fromEntries(ids.map((m) => [m, dd[`precipitation_sum_${m}`] ?? dd.time.map(() => null)]));
+    let today = dd.time.indexOf(todayIso); if (today < 0) today = 21;
+    return { name: d[0], r: assessRisk({ dates: dd.time, models, today, clim }) };
+  }).filter(Boolean).sort((a, b) => b.r.score - a.r.score || b.r.anomaly - a.r.anomaly);
+  S.distRisk[prov] = { at: Date.now(), rows };
+  return rows;
 }
 
 // ---------------------------------------------------------------- แท็บ: แม่น้ำ
@@ -794,6 +1001,7 @@ const RSECS = [
   { id: "river", label: "แม่น้ำ: สถานีที่ระดับน้ำสูง" },
   { id: "dam", label: "เขื่อนขนาดใหญ่" },
   { id: "rain", label: "ฝน 24 ชม. ที่ผ่านมา" },
+  { id: "risk", label: "ความเสี่ยงจากฝนสะสม / ความผิดปกติ" },
   { id: "watch", label: "จังหวัดที่ควรจับตา", scope: "nat" },
   { id: "fc", label: "พยากรณ์: ช่วงเวลาที่ฝนจะตก 3 วัน", scope: "prov" },
   { id: "fc10", label: "พยากรณ์: กราฟฝน 10 วัน (3 โมเดล)", scope: "prov" },
@@ -801,7 +1009,7 @@ const RSECS = [
   { id: "note", label: "หมายเหตุ / ข้อความของฉัน" },
 ];
 S.rpt = Object.assign(
-  { title: "", author: "", note: "", rows: 15, sec: { kpi: 1, insight: 1, river: 1, dam: 1, rain: 1, watch: 1, fc: 1, fc10: 0, dist: 1, note: 0 } },
+  { title: "", author: "", note: "", rows: 15, sec: { kpi: 1, insight: 1, risk: 1, river: 1, dam: 1, rain: 1, watch: 1, fc: 1, fc10: 0, dist: 1, note: 0 } },
   store.get("rpt", {}),
 );
 const saveRpt = () => store.set("rpt", S.rpt);
@@ -878,6 +1086,20 @@ async function buildReportHtml() {
   const sd = await summaryData();
   if (secOn("kpi")) h += sec("ตัวเลขสำคัญ", sd.kpis);
   if (secOn("insight")) h += sec("บทวิเคราะห์", `<ul class="insights">${sd.notes.join("")}</ul>`);
+
+  if (S.rpt.sec.risk === undefined) S.rpt.sec.risk = 1;
+  if (secOn("risk") && S.risk?.prov) {
+    const when = `<div class="note">ประเมินเมื่อ ${thTime(S.risk.updated)} น. · คะแนน 0–100 จากฝนสะสมเทียบค่าปกติของพื้นที่ ดินชุ่มน้ำ ความแรง ความต่อเนื่อง และระดับน้ำ${S.risk.climDone < S.risk.climTotal ? ` · ค่าปกติพร้อม ${S.risk.climDone}/${S.risk.climTotal} จังหวัด` : ""}</div>`;
+    if (S.prov && S.risk.prov[S.prov]) {
+      const r = S.risk.prov[S.prov], l = riskLevel(r.score);
+      h += sec(`ความเสี่ยงจากฝนสะสม: ${r.score}/100 · ${l.label}`, riskFindings(r) + riskChart(r) + when);
+    } else {
+      const list = Object.entries(S.risk.prov).map(([p, r]) => ({ p: +p, ...r })).filter((r) => r.score >= 10).sort((a, b) => b.score - a.score).slice(0, N);
+      h += sec("ความเสี่ยงจากฝนสะสม (เรียงตามคะแนน)", list.length ? `<table class="t"><thead><tr><th>จังหวัด</th><th>คะแนน</th><th>ระดับ</th><th>ฝน 7 วัน</th><th>ความผิดปกติ</th><th style="text-align:left">สังเกต</th></tr></thead><tbody>
+        ${list.map((r) => `<tr><td>${esc(provName(r.p))}</td><td><b>${r.score}</b></td><td>${riskPill(r)}</td><td>${fmt(r.v.event7)}</td><td>${r.anomaly > 100 ? "เกินสถิติ" : `P${fmt(r.anomaly)}`}</td><td class="l small">${[r.onset ? "ฉับพลัน" : "", r.run?.len >= 2 ? `ต่อเนื่อง ${r.run.len} วัน` : "", r.firstHeavy && r.firstHeavy.inDays > 0 ? `หนัก${inDaysText(r.firstHeavy.inDays)}` : ""].filter(Boolean).join(" · ") || "–"}</td></tr>`).join("")}
+        </tbody></table>${when}` : `<div class="empty">ไม่มีจังหวัดที่มีความเสี่ยงนัยสำคัญ</div>${when}`);
+    }
+  }
 
   if (secOn("river")) {
     const hist = S.prov ? await loadWlHist(S.prov) : null;
@@ -996,7 +1218,7 @@ async function render() {
   renderHeader();
   if (!S.data) return;
   const seq = ++renderSeq;
-  const views = { sum: viewSummary, river: viewRiver, dam: viewDam, rain: viewRain, wx: viewWx, report: viewReport };
+  const views = { sum: viewSummary, risk: viewRisk, river: viewRiver, dam: viewDam, rain: viewRain, wx: viewWx, report: viewReport };
   try { await views[S.tab](); } catch (e) {
     console.error(e);
     if (seq === renderSeq) $("#view").innerHTML = `<div class="card empty">แสดงผลไม่สำเร็จ: ${esc(e.message)}</div>`;
@@ -1018,8 +1240,9 @@ function setTab(t) {
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
 document.addEventListener("click", (e) => {
-  const el = e.target.closest("[data-tab],[data-prov],[data-open],[data-region],[data-point],[data-go],[data-geo],[data-dist],[data-hour]");
+  const el = e.target.closest("[data-tab],[data-prov],[data-open],[data-region],[data-point],[data-go],[data-geo],[data-dist],[data-hour],[data-rsort]");
   if (!el) return;
+  if (el.dataset.rsort) { S.riskSort = el.dataset.rsort; return render(); }
   if (el.dataset.hour) {
     S.hsel = el.dataset.hour;
     document.querySelectorAll(".hc.sel").forEach((c) => c.classList.remove("sel"));
@@ -1028,7 +1251,7 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (el.dataset.geo) return useMyLocation();
-  if (el.dataset.dist) return selectDist(el.dataset.dist);
+  if (el.dataset.dist) { if (S.tab !== "wx") { S.dist[S.prov] = el.dataset.dist; store.set("dist", S.dist); S.point = null; return setTab("wx"); } return selectDist(el.dataset.dist); }
   if (el.dataset.tab) return setTab(el.dataset.tab);
   if (el.dataset.go) return setTab(el.dataset.go);
   if (el.dataset.prov) return setProv(el.dataset.prov);
@@ -1046,6 +1269,7 @@ async function refresh() {
   try {
     S.data = await getJSON("data/latest.json");
     S.data.fetchedAt = Date.now();
+    S.risk = await getJSON("data/risk.json").catch(() => null);
     S.wlHist = {}; S.damHist = null; S.rainHist = null;
   } catch (e) {
     if (!S.data) $("#view").innerHTML = `<div class="card empty">ยังไม่มีข้อมูล<br><span class="small">ถ้าเพิ่งติดตั้ง รอให้ GitHub Actions รันรอบแรกเสร็จ (ประมาณ 1–2 นาที)</span></div>`;

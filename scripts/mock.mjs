@@ -1,5 +1,6 @@
 // สร้างข้อมูลจำลองไว้ลองหน้าเว็บในเครื่อง (ไม่ต้องต่อเน็ต): node scripts/mock.mjs
 import { mkdir, writeFile, readFile, cp } from "node:fs/promises";
+import { buildClimatology, assessRisk } from "../site/risk.js";
 import { normalizeWaterLevels, normalizeRain, normalizeDams, mergeWaterHistory, mergeDamHistory, mergeRainHistory } from "./lib.mjs";
 
 const OUT = "out/data";
@@ -82,5 +83,39 @@ await writeFile(`${OUT}/latest.json`, JSON.stringify({
 for (const [p, h] of Object.entries(wlHist)) await writeFile(`${OUT}/wl/${p}.json`, JSON.stringify(h));
 await writeFile(`${OUT}/dams-history.json`, JSON.stringify(damHist));
 await writeFile(`${OUT}/rain-history.json`, JSON.stringify(rainHist));
+// ---- ความเสี่ยงจำลอง: ค่าปกติจาก "ERA5" สังเคราะห์ + สถานการณ์ตัวอย่างบางจังหวัด
+const climProv = {};
+const riskProv = {};
+const todayIso = new Date(now + 7 * 3600e3).toISOString().slice(0, 10);
+const scenario = { 50: "onset", 57: "onset", 22: "persist", 21: "persist", 80: "heavy", 34: "ahead", 45: "ahead" };
+for (const p of provinces) {
+  const south = p.lat < 11, dryish = [30, 31, 32, 40, 41].includes(p.code) || p.code === 50 || p.code === 57;
+  const dates = [], pr = [];
+  for (let t = Date.UTC(2015, 0, 1); t <= Date.UTC(2024, 11, 31); t += 864e5) {
+    const d = new Date(t).toISOString().slice(0, 10), m = +d.slice(5, 7);
+    const wet = south ? m >= 10 || m <= 1 || (m >= 5 && m <= 9 && rnd() < 0.5) : m >= 5 && m <= 10;
+    dates.push(d);
+    pr.push(wet && rnd() < 0.5 ? -Math.log(rnd() + 1e-9) * (dryish ? 7 : south ? 22 : 14) : rnd() < 0.04 ? 3 : 0);
+  }
+  climProv[p.code] = buildClimatology(dates, pr);
+  const n = 38, today = 30;
+  const ds = Array.from({ length: n }, (_, i) => new Date(Date.parse(todayIso) + (i - today) * 864e5).toISOString().slice(0, 10));
+  const kind = scenario[p.code];
+  const base = Array.from({ length: n }, () => (rnd() < 0.45 ? -Math.log(rnd() + 1e-9) * 6 : 0));
+  if (kind === "onset") { for (let i = 23; i < 30; i++) base[i] = rnd() * 2; base[30] = 45; base[31] = 70; base[32] = 40; }
+  if (kind === "persist") for (let i = 26; i < 34; i++) base[i] = 35 + rnd() * 40;
+  if (kind === "heavy") { base[30] = 95; base[31] = 60; }
+  if (kind === "ahead") { base[32] = 55; base[33] = 65; base[34] = 30; }
+  const models = { ecmwf_ifs025: base.map((x) => +(x).toFixed(1)), gfs_seamless: base.map((x) => +(x * (0.8 + rnd() * 0.5)).toFixed(1)), icon_seamless: base.map((x, i) => (i > 35 ? null : +(x * (0.7 + rnd() * 0.5)).toFixed(1))) };
+  const rv = { n: 0, high: 0, over: 0 };
+  for (const s of wl) if (s.p === p.code) { rv.n++; if (s.pct > 100) rv.over++; else if (s.pct > 70) rv.high++; }
+  const r = assessRisk({ dates: ds, models, today, clim: climProv[p.code], river: rv, stationMax: rain.byProv[p.code]?.max ?? null });
+  r.series = { start: ds[16], today: 14, m: Object.fromEntries(Object.entries(models).map(([k, v]) => [k, v.slice(16, 38)])) };
+  riskProv[p.code] = r;
+}
+const partial = Object.fromEntries(Object.entries(climProv).slice(0, 60));
+await writeFile(`${OUT}/climatology.json`, JSON.stringify({ source: "mock", years: [2015, 2024], prov: partial, done: 60, total: 77 }));
+await writeFile(`${OUT}/risk.json`, JSON.stringify({ updated: now, climDone: 60, climTotal: 77, climYears: [2015, 2024], prov: riskProv }));
+
 await cp("site", "out", { recursive: true });
 console.log(`ข้อมูลจำลอง: ${wl.length} สถานีระดับน้ำ, ${rain.stations.length} สถานีฝน, ${dams.dams.length} เขื่อน → เปิดโฟลเดอร์ out/`);

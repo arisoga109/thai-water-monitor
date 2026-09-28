@@ -191,3 +191,19 @@ table.t tr.cur td { font-weight: 700; color: var(--accent); }
   .report .rsec h3, .report tr, .report li, .report .kpis, .report svg { break-inside: avoid; }
   .report h3 { break-after: avoid; }
 }
+
+/* ความเสี่ยง */
+.row .rank { flex: none; width: 22px; text-align: center; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
+.row .sub.wrap { white-space: normal; }
+.row .name .pill { margin-left: 4px; vertical-align: 1px; }
+.risk-hero { display: flex; align-items: center; gap: 16px; border-left: 6px solid var(--c); }
+.risk-hero .score b { font-size: 44px; line-height: 1; color: var(--c); font-variant-numeric: tabular-nums; }
+.risk-hero .score span { color: var(--muted); font-size: 14px; }
+.risk-hero .lvl { font-size: 20px; font-weight: 700; color: var(--c); }
+.factor { padding: 6px 0; }
+.factor .fl { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
+.factor .fl b { font-variant-numeric: tabular-nums; }
+details.method summary { cursor: pointer; }
+details.method p { font-size: 13px; margin: 8px 0; }
+.tabs button { min-width: 0; }
+table.t.nowrap td:not(:first-child) { white-space: nowrap; }
