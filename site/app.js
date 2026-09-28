@@ -1,6 +1,8 @@
 // ติดตามน้ำไทย — หน้าเว็บอ่านไฟล์ JSON ที่ GitHub Actions อัปเดตให้ทุก 30 นาที
 // พยากรณ์อากาศและน้ำท่าเรียกจาก Open-Meteo โดยตรง (ฟรี ไม่ต้องใช้ key)
 
+import { REPORT_CSS, reportToPng, reportToPdf, deliverFile } from "./report.js";
+
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n, d = 0) => (n === null || n === undefined || Number.isNaN(n) ? "–" : Number(n).toLocaleString("th-TH", { minimumFractionDigits: d, maximumFractionDigits: d }));
@@ -178,7 +180,8 @@ function stackBar(counts, bands) {
 }
 
 // ---------------------------------------------------------------- แท็บ: สรุป
-async function viewSummary() {
+/** คำนวณตัวเลขหลักและบทวิเคราะห์ ใช้ร่วมกันระหว่างหน้าสรุปและรายงาน */
+async function summaryData() {
   const rv = rivers(), dm = dams();
   const rain = S.data.rain;
   const counts = RIVER_BANDS.map(() => 0);
@@ -193,7 +196,7 @@ async function viewSummary() {
   const maxRain = S.prov ? rp?.max ?? null : Math.max(0, ...Object.values(rain.byProv).map((x) => x.max));
   const topRain = rain.top.filter(inProv)[0];
 
-  let html = `<div class="kpis">
+  const kpis = `<div class="kpis">
     <div class="kpi ${over.length ? "alert" : ""}"><div class="v">${fmt(over.length)}</div><div class="l">สถานีน้ำล้นตลิ่ง</div></div>
     <div class="kpi"><div class="v">${fmt(high.length)}</div><div class="l">สถานีน้ำมาก (70–100%)</div></div>
     <div class="kpi"><div class="v">${damPct === null ? "–" : fmt(damPct) + "%"}</div><div class="l">น้ำในเขื่อนใหญ่ ${dm.length ? `(${dm.length} แห่ง)` : ""}</div></div>
@@ -235,6 +238,12 @@ async function viewSummary() {
     if (heavy.length) push(`มีฝนหนัก (>35 มม.) ใน <b>${heavy.length}</b> จังหวัด เช่น ${heavy.sort((a, b) => b[1].max - a[1].max).slice(0, 4).map(([p, x]) => `${provName(p)} ${fmt(x.max)} มม.`).join(", ")}`, "high");
     else push("ไม่มีจังหวัดที่ฝนหนักเกิน 35 มม. ใน 24 ชม. ที่ผ่านมา", "normal");
   }
+  return { rv, dm, counts, kpis, notes };
+}
+
+async function viewSummary() {
+  const { rv, counts, kpis, notes } = await summaryData();
+  let html = kpis;
   html += `<h2>บทวิเคราะห์</h2><div class="card"><ul class="insights">${notes.join("")}</ul></div>`;
 
   if (rv.length) html += `<h2>สถานะแม่น้ำ (% ความจุลำน้ำ)</h2><div class="card">${stackBar(counts, RIVER_BANDS)}</div>`;
@@ -259,18 +268,18 @@ async function viewSummary() {
   }
 }
 
-function provinceRanking() {
+function provinceRanking(limit = 15, clickable = true) {
   const rows = new Map();
   const get = (p) => { if (!rows.has(p)) rows.set(p, { p, over: 0, high: 0, n: 0, rain: S.data.rain.byProv[p]?.max ?? 0, dam: null }); return rows.get(p); };
   for (const s of S.data.wl) { if (!s.p) continue; const r = get(s.p); r.n++; if (s.pct > 100) r.over++; else if (s.pct > 70) r.high++; }
   for (const d of S.data.dams.dams) if (d.p) { const r = get(d.p); r.dam = Math.max(r.dam ?? 0, d.pct); }
   for (const p of Object.keys(S.data.rain.byProv)) if (+p) get(+p);
   const score = (r) => r.over * 3 + r.high + (r.rain > 90 ? 4 : r.rain > 35 ? 2 : 0) + (r.dam > 100 ? 3 : r.dam > 80 ? 1 : 0);
-  const list = [...rows.values()].map((r) => ({ ...r, sc: score(r) })).filter((r) => r.sc > 0).sort((a, b) => b.sc - a.sc).slice(0, 15);
+  const list = [...rows.values()].map((r) => ({ ...r, sc: score(r) })).filter((r) => r.sc > 0).sort((a, b) => b.sc - a.sc).slice(0, limit);
   if (!list.length) return `<div class="empty small">ไม่มีจังหวัดที่เข้าเกณฑ์เฝ้าระวัง</div>`;
   return `<table class="t"><thead><tr><th>จังหวัด</th><th>ล้นตลิ่ง</th><th>น้ำมาก</th><th>ฝนสูงสุด</th><th>เขื่อน</th></tr></thead><tbody>
     ${list.map((r) => `<tr class="click" data-prov="${r.p}"><td>${esc(provName(r.p))}</td><td class="${r.over ? "up" : ""}">${r.over || "–"}</td><td>${r.high || "–"}</td><td>${r.rain ? fmt(r.rain) : "–"}</td><td>${r.dam === null ? "–" : fmt(r.dam) + "%"}</td></tr>`).join("")}
-  </tbody></table><div class="note">แตะชื่อจังหวัดเพื่อดูรายละเอียด · เรียงตามคะแนนรวมจากระดับน้ำ ฝน และเขื่อน</div>`;
+  </tbody></table><div class="note">${clickable ? "แตะชื่อจังหวัดเพื่อดูรายละเอียด · " : ""}เรียงตามคะแนนรวมจากระดับน้ำ ฝน และเขื่อน</div>`;
 }
 
 // ---------------------------------------------------------------- แท็บ: แม่น้ำ
@@ -644,7 +653,7 @@ async function getDistrictForecast(prov) {
   return data;
 }
 
-function districtTable(data) {
+function districtTable(data, clickable = true) {
   const rows = [...data].filter((d) => d.total !== null).sort((a, b) => b.total - a.total);
   if (!rows.length) return `<div class="empty small">ไม่มีข้อมูล</div>`;
   return `<table class="t"><thead><tr><th>${S.prov === 10 ? "เขต" : "อำเภอ"}</th><th>ฝนรวม</th><th>เริ่มตก</th><th>หนักสุด</th><th>โอกาส</th></tr></thead><tbody>
@@ -652,7 +661,7 @@ function districtTable(data) {
       const c = HOUR_CLASSES[hourClass(d.peak)];
       return `<tr class="click ${d.name === S.dist[S.prov] ? "cur" : ""}" data-dist="${esc(d.name)}"><td>${esc(d.name)}</td><td>${fmt(d.total, 1)}</td><td>${d.first ? `${d.first.slice(0, 10) !== new Date(Date.now() + 7 * HOUR).toISOString().slice(0, 10) ? "พรุ่งนี้ " : ""}${hh(d.first)}` : "–"}</td><td><span class="dotc" style="background:var(--${c.key})"></span>${d.peak >= 0.1 ? hh(d.peakT) : "–"}</td><td>${fmt(d.prob)}%</td></tr>`;
     }).join("")}
-  </tbody></table><div class="note">24 ชม. ข้างหน้า (มม.) จากโมเดลที่ดีที่สุดของแต่ละพื้นที่ · แตะชื่อเพื่อดูรายชั่วโมง</div>`;
+  </tbody></table><div class="note">24 ชม. ข้างหน้า (มม.) จากโมเดลที่ดีที่สุดของแต่ละพื้นที่${clickable ? " · แตะชื่อเพื่อดูรายชั่วโมง" : ""}</div>`;
 }
 
 function bindDist() {
@@ -778,6 +787,194 @@ async function viewWx() {
   }).catch(() => { const el = $("#flood"); if (el) el.innerHTML = `<div class="empty small">โหลดข้อมูลน้ำท่าไม่สำเร็จ</div>`; });
 }
 
+// ---------------------------------------------------------------- รายงานสรุป (PDF / รูปภาพ / พิมพ์)
+const RSECS = [
+  { id: "kpi", label: "ตัวเลขสำคัญ" },
+  { id: "insight", label: "บทวิเคราะห์" },
+  { id: "river", label: "แม่น้ำ: สถานีที่ระดับน้ำสูง" },
+  { id: "dam", label: "เขื่อนขนาดใหญ่" },
+  { id: "rain", label: "ฝน 24 ชม. ที่ผ่านมา" },
+  { id: "watch", label: "จังหวัดที่ควรจับตา", scope: "nat" },
+  { id: "fc", label: "พยากรณ์: ช่วงเวลาที่ฝนจะตก 3 วัน", scope: "prov" },
+  { id: "fc10", label: "พยากรณ์: กราฟฝน 10 วัน (3 โมเดล)", scope: "prov" },
+  { id: "dist", label: "พยากรณ์: ฝน 24 ชม. ข้างหน้า รายอำเภอ", scope: "prov" },
+  { id: "note", label: "หมายเหตุ / ข้อความของฉัน" },
+];
+S.rpt = Object.assign(
+  { title: "", author: "", note: "", rows: 15, sec: { kpi: 1, insight: 1, river: 1, dam: 1, rain: 1, watch: 1, fc: 1, fc10: 0, dist: 1, note: 0 } },
+  store.get("rpt", {}),
+);
+const saveRpt = () => store.set("rpt", S.rpt);
+const secOn = (id) => {
+  const d = RSECS.find((x) => x.id === id);
+  if (d.scope === "nat" && S.prov) return false;
+  if (d.scope === "prov" && !S.prov) return false;
+  return !!S.rpt.sec[id];
+};
+const rptScope = () => (S.prov ? `จังหวัด${provName(S.prov)}` : "ทั้งประเทศ");
+const rptTitle = () => S.rpt.title.trim() || `รายงานสรุปสถานการณ์น้ำ ${rptScope()}`;
+
+async function viewReport() {
+  const r = S.rpt;
+  $("#view").innerHTML = `
+    <div class="card builder">
+      <h2 style="margin-top:0">สร้างรายงานสรุป</h2>
+      <div class="small muted" style="margin-bottom:10px">ขอบเขต: <b>${esc(rptScope())}</b> — เปลี่ยนจังหวัดได้จากเมนูด้านบน${S.prov ? " · จุดพยากรณ์ใช้อำเภอที่เลือกในแท็บอากาศ" : ""}</div>
+      <label class="fld">ชื่อรายงาน<input id="r-title" type="text" placeholder="${esc(`รายงานสรุปสถานการณ์น้ำ ${rptScope()}`)}" value="${esc(r.title)}"></label>
+      <label class="fld">ผู้จัดทำ / หน่วยงาน (ไม่บังคับ)<input id="r-author" type="text" value="${esc(r.author)}"></label>
+      <div class="fld">หัวข้อที่จะใส่</div>
+      <div class="checks">${RSECS.map((d) => {
+        const off = (d.scope === "nat" && S.prov) || (d.scope === "prov" && !S.prov);
+        return `<label class="chk ${off ? "off" : ""}"><input type="checkbox" data-sec="${d.id}" ${r.sec[d.id] && !off ? "checked" : ""} ${off ? "disabled" : ""}><span>${esc(d.label)}${off ? `<br><span class="small muted">${d.scope === "nat" ? "ใช้ได้เมื่อเลือกทั้งประเทศ" : "ใช้ได้เมื่อเลือกจังหวัด"}</span>` : ""}</span></label>`;
+      }).join("")}</div>
+      <label class="fld" id="r-note-wrap" ${r.sec.note ? "" : "hidden"}>ข้อความของฉัน<textarea id="r-note" rows="3" placeholder="เช่น ข้อสังเกตจากพื้นที่ แผนรับมือ">${esc(r.note)}</textarea></label>
+      <label class="fld">จำนวนแถวในตาราง
+        <select id="r-rows">${[10, 15, 25, 50].map((n) => `<option value="${n}" ${+r.rows === n ? "selected" : ""}>${n} แถว</option>`).join("")}</select></label>
+      <div class="actions">
+        <button class="btn primary" data-export="png">🖼️ รูปภาพ</button>
+        <button class="btn primary" data-export="pdf">📄 PDF</button>
+        <button class="btn" data-export="print">🖨️ พิมพ์</button>
+      </div>
+      <div id="r-status" class="small muted" style="margin-top:6px">รูปภาพเหมาะสำหรับส่ง LINE · PDF แบ่งหน้า A4 อัตโนมัติ</div>
+    </div>
+    <h2>ตัวอย่าง</h2>
+    <div class="paper-wrap"><div id="report-paper" class="report"><div class="loading">กำลังสร้างรายงาน…</div></div></div>`;
+
+  const upd = debounce(() => { saveRpt(); renderPaper(); }, 350);
+  $("#r-title").addEventListener("input", (e) => { r.title = e.target.value; upd(); });
+  $("#r-author").addEventListener("input", (e) => { r.author = e.target.value; upd(); });
+  $("#r-note").addEventListener("input", (e) => { r.note = e.target.value; upd(); });
+  $("#r-rows").addEventListener("change", (e) => { r.rows = +e.target.value; saveRpt(); renderPaper(); });
+  document.querySelectorAll("[data-sec]").forEach((c) => c.addEventListener("change", () => {
+    r.sec[c.dataset.sec] = c.checked ? 1 : 0;
+    $("#r-note-wrap").hidden = !r.sec.note;
+    saveRpt(); renderPaper();
+  }));
+  document.querySelectorAll("[data-export]").forEach((b) => b.addEventListener("click", () => exportReport(b.dataset.export)));
+  await renderPaper();
+}
+
+let paperSeq = 0;
+async function renderPaper() {
+  const el = $("#report-paper");
+  if (!el) return;
+  const seq = ++paperSeq;
+  const html = await buildReportHtml();
+  if (seq === paperSeq && $("#report-paper")) $("#report-paper").innerHTML = html;
+}
+
+async function buildReportHtml() {
+  const N = +S.rpt.rows || 15;
+  const sec = (title, body) => `<div class="rsec"><h3>${title}</h3>${body}</div>`;
+  const now = Date.now();
+  let h = `<div class="r-head"><div>
+      <div class="r-title">${esc(rptTitle())}</div>
+      <div class="r-sub">${esc(rptScope())} · ข้อมูล ณ ${thTime(S.data.updated)} น.</div>
+      ${S.rpt.author.trim() ? `<div class="r-sub">จัดทำโดย ${esc(S.rpt.author.trim())}</div>` : ""}
+    </div>
+    <svg class="r-logo" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#ffffff" fill-opacity=".14"/><path d="M256 92c-62 86-118 158-118 222a118 118 0 0 0 236 0c0-64-56-136-118-222z" fill="#e8f6fc"/><path d="M168 318c30 0 30-18 58-18s28 18 58 18 30-18 58-18v34c-28 0-28 18-58 18s-30-18-58-18-28 18-58 18z" fill="#0b7fab"/></svg>
+  </div>`;
+
+  const sd = await summaryData();
+  if (secOn("kpi")) h += sec("ตัวเลขสำคัญ", sd.kpis);
+  if (secOn("insight")) h += sec("บทวิเคราะห์", `<ul class="insights">${sd.notes.join("")}</ul>`);
+
+  if (secOn("river")) {
+    const hist = S.prov ? await loadWlHist(S.prov) : null;
+    const list = sd.rv.filter((s) => s.pct !== null).map((s) => ({ ...s, d: hist ? wlChange(hist, s, 24) : s.msl !== null && s.prev !== null ? s.msl - s.prev : null }))
+      .sort((a, b) => b.pct - a.pct).slice(0, N);
+    const body = list.length ? `${stackBar(sd.counts, RIVER_BANDS)}
+      <table class="t"><thead><tr><th>สถานี</th><th style="text-align:left">พื้นที่</th><th>% ตลิ่ง</th><th>สถานะ</th><th>เปลี่ยนแปลง${hist ? " 24 ชม." : ""}</th></tr></thead><tbody>
+      ${list.map((s) => `<tr><td>${esc(s.n)}</td><td class="l">${esc([s.a, S.prov ? null : provName(s.p)].filter(Boolean).join(", "))}</td><td>${fmt(s.pct)}%</td><td>${pill(band(RIVER_BANDS, s.pct))}</td><td class="${s.d > 0.01 ? "up" : s.d < -0.01 ? "down" : ""}">${s.d === null ? "–" : `${sign(s.d, 2)} ม.`}</td></tr>`).join("")}
+      </tbody></table><div class="note">เรียงตามระดับน้ำเทียบตลิ่งจากมากไปน้อย ${fmt(list.length)} จาก ${fmt(sd.rv.length)} สถานี</div>` : `<div class="empty">ไม่มีสถานีที่รายงานข้อมูล</div>`;
+    h += sec("แม่น้ำ: สถานีที่ระดับน้ำสูง", body);
+  }
+
+  if (secOn("dam")) {
+    const dh = await loadDamHist();
+    const list = [...sd.dm].sort((a, b) => b.pct - a.pct);
+    const shown = list.slice(0, N);
+    const body = list.length ? `<table class="t"><thead><tr><th>เขื่อน</th><th>% ความจุ</th><th>ปริมาตร</th><th>ไหลเข้า</th><th>ระบาย</th><th>7 วัน</th></tr></thead><tbody>
+      ${shown.map((d) => { const c7 = damChange(dh, d, 7); return `<tr><td>${esc(d.n)}<span class="muted small"> ${esc(d.p ? provName(d.p) : "")}</span></td><td>${fmt(d.pct)}%</td><td>${fmt(d.v)}</td><td>${fmt(d.in, 2)}</td><td>${fmt(d.out, 2)}</td><td class="${c7 > 0 ? "up" : c7 < 0 ? "down" : ""}">${sign(c7)}</td></tr>`; }).join("")}
+      <tr><td><b>รวม ${list.length} แห่ง</b></td><td><b>${fmt((sum(list.map((d) => d.v)) / sum(list.map((d) => d.st))) * 100)}%</b></td><td><b>${fmt(sum(list.map((d) => d.v)))}</b></td><td>${fmt(sum(list.map((d) => d.in)), 1)}</td><td>${fmt(sum(list.map((d) => d.out)), 1)}</td><td></td></tr>
+      </tbody></table><div class="note">หน่วย: ล้าน ลบ.ม. (ไหลเข้า/ระบาย ต่อวัน) · % เทียบระดับเก็บกักปกติ · ข้อมูลกรมชลประทาน ณ ${esc(S.data.dams.date || "–")}</div>`
+      : `<div class="empty">ไม่มีเขื่อนขนาดใหญ่ของกรมชลประทานในพื้นที่นี้</div>`;
+    h += sec("เขื่อนขนาดใหญ่", body);
+  }
+
+  if (secOn("rain")) {
+    const rain = S.data.rain;
+    let body;
+    if (S.prov) {
+      const top = rain.top.filter(inProv).slice(0, N);
+      body = top.length ? `<table class="t"><thead><tr><th>สถานี</th><th style="text-align:left">อำเภอ</th><th>ฝน 24 ชม. (มม.)</th><th>ระดับ</th></tr></thead><tbody>
+        ${top.map((s) => { const c = rainClass(s.mm); return `<tr><td>${esc(s.n)}</td><td class="l">${esc(s.a || "")}</td><td>${fmt(s.mm, 1)}</td><td><span class="pill" style="--c:var(--${c.key})">${c.label}</span></td></tr>`; }).join("")}
+        </tbody></table>` : `<div class="empty">ไม่มีฝนใน 24 ชม. ที่ผ่านมา</div>`;
+    } else {
+      const list = Object.entries(rain.byProv).filter(([p]) => +p).map(([p, x]) => ({ p: +p, ...x })).sort((a, b) => b.max - a.max).slice(0, N);
+      body = `<table class="t"><thead><tr><th>จังหวัด</th><th>สูงสุด (มม.)</th><th>เฉลี่ย (มม.)</th><th>สถานีมีฝน</th><th>ระดับ</th></tr></thead><tbody>
+        ${list.map((x) => { const c = rainClass(x.max); return `<tr><td>${esc(provName(x.p))}</td><td>${fmt(x.max, 1)}</td><td>${fmt(x.avg, 1)}</td><td>${x.wet}/${x.n}</td><td><span class="pill" style="--c:var(--${c.key})">${c.label}</span></td></tr>`; }).join("")}
+        </tbody></table>`;
+    }
+    h += sec("ฝน 24 ชม. ที่ผ่านมา", body + `<div class="note">เกณฑ์กรมอุตุฯ: 0.1–10 เล็กน้อย · 10.1–35 ปานกลาง · 35.1–90 หนัก · >90 มม. หนักมาก</div>`);
+  }
+
+  if (secOn("watch")) h += sec("จังหวัดที่ควรจับตา", provinceRanking(N, false));
+
+  if (secOn("fc") || secOn("fc10")) {
+    const pt = wxPoint();
+    try {
+      const wx = await getForecast(pt.lat, pt.lon);
+      if (secOn("fc")) {
+        const upcoming = hourlyRows(wx).filter((r) => r.ms + HOUR > now).slice(0, 72);
+        const ps = rainPeriods(upcoming);
+        h += sec(`พยากรณ์ช่วงเวลาที่ฝนจะตก 3 วัน · ${esc(pt.label)}`, `<ul class="insights">${ps.length ? ps.slice(0, 8).map((p) => { const t = periodText(p); return `<li style="--sev:var(--${t.key})">${t.html}</li>`; }).join("") : `<li style="--sev:var(--normal)">ไม่คาดว่าจะมีฝนนัยสำคัญใน 3 วันข้างหน้า</li>`}</ul>
+          <div class="note">เวลาอาจคลาดได้ 2–3 ชม. · ความแรงต่อชั่วโมง: เล็กน้อย ≤2.5 · ปานกลาง ≤7.5 · หนัก ≤20 · หนักมาก >20 มม.</div>`);
+      }
+      if (secOn("fc10")) {
+        const a = analyzeForecast(wx);
+        const series = MODELS.map((m, i) => ({ name: m.name, values: a.per[i].slice(0, 10), color: m.color }));
+        h += sec(`พยากรณ์ฝน 10 วัน เทียบ 3 โมเดล · ${esc(pt.label)}`, `<ul class="insights">${a.lines.map((l) => `<li style="--sev:var(--${l.key})">${l.text}</li>`).join("")}</ul>
+          ${groupedBars({ labels: a.days.slice(0, 10).map(dayLabel), series })}${legend(series)}`);
+      }
+    } catch {
+      h += sec("พยากรณ์ฝน", `<div class="empty">โหลดพยากรณ์ไม่สำเร็จ</div>`);
+    }
+  }
+
+  if (secOn("dist")) {
+    try { h += sec(`ฝน 24 ชม. ข้างหน้า ราย${S.prov === 10 ? "เขต" : "อำเภอ"}`, districtTable(await getDistrictForecast(S.prov), false)); }
+    catch { h += sec("ฝนรายอำเภอ", `<div class="empty">โหลดข้อมูลไม่สำเร็จ</div>`); }
+  }
+
+  if (secOn("note") && S.rpt.note.trim()) h += sec("หมายเหตุ", `<div class="r-usernote">${esc(S.rpt.note.trim())}</div>`);
+
+  h += `<div class="r-foot">ที่มา: คลังข้อมูลน้ำแห่งชาติ (สสน.), กรมชลประทาน, Open-Meteo (ECMWF/GFS/ICON) · สร้างรายงานเมื่อ ${thTime(now)} น.<br>
+    บทวิเคราะห์และพยากรณ์เป็นการประเมินเบื้องต้นจากข้อมูลอัตโนมัติ ไม่ใช่ประกาศทางการ โปรดติดตามประกาศของกรมอุตุนิยมวิทยา กรมชลประทาน และ ปภ. ประกอบ</div>`;
+  return h;
+}
+
+async function exportReport(kind) {
+  const status = $("#r-status");
+  const paper = $("#report-paper");
+  if (!paper) return;
+  if (kind === "print") { window.print(); return; }
+  const stamp = new Date(Date.now() + 7 * HOUR).toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
+  const base = `รายงานน้ำ_${rptScope().replace(/\s+/g, "")}_${stamp}`;
+  document.querySelectorAll("[data-export]").forEach((b) => (b.disabled = true));
+  status.textContent = "กำลังสร้างไฟล์… (ครั้งแรกอาจใช้เวลาหลายวินาทีเพื่อโหลดฟอนต์)";
+  try {
+    const blob = kind === "png" ? await reportToPng(paper) : await reportToPdf(paper, rptScope());
+    const res = await deliverFile(blob, `${base}.${kind}`, rptTitle());
+    status.textContent = res === "shared" ? "ส่งไฟล์เรียบร้อย" : res === "cancelled" ? "ยกเลิกแล้ว" : `ดาวน์โหลด ${base}.${kind} แล้ว`;
+  } catch (e) {
+    console.error(e);
+    status.innerHTML = `สร้างไฟล์ไม่สำเร็จในเบราว์เซอร์นี้ — ลองกด <b>พิมพ์</b> แล้วเลือก "บันทึกเป็น PDF" แทน`;
+  } finally {
+    document.querySelectorAll("[data-export]").forEach((b) => (b.disabled = false));
+  }
+}
+
 // ---------------------------------------------------------------- โครงหน้า
 function statusNote() {
   const st = S.data?.status ?? {};
@@ -791,6 +988,7 @@ function renderHeader() {
   const warn = Object.values(st).some((v) => !v.ok) || Date.now() - (S.data?.updated ?? 0) > 3 * HOUR;
   $("#updated").innerHTML = S.data ? `<span class="dot ${warn ? "warn" : ""}"></span>อัปเดต ${ago(S.data.updated)}` : "ไม่มีข้อมูล";
   document.querySelectorAll(".tabs button").forEach((b) => b.setAttribute("aria-selected", b.dataset.tab === S.tab));
+  $("#rptBtn")?.setAttribute("aria-pressed", S.tab === "report");
 }
 
 let renderSeq = 0;
@@ -798,7 +996,7 @@ async function render() {
   renderHeader();
   if (!S.data) return;
   const seq = ++renderSeq;
-  const views = { sum: viewSummary, river: viewRiver, dam: viewDam, rain: viewRain, wx: viewWx };
+  const views = { sum: viewSummary, river: viewRiver, dam: viewDam, rain: viewRain, wx: viewWx, report: viewReport };
   try { await views[S.tab](); } catch (e) {
     console.error(e);
     if (seq === renderSeq) $("#view").innerHTML = `<div class="card empty">แสดงผลไม่สำเร็จ: ${esc(e.message)}</div>`;
@@ -865,6 +1063,8 @@ async function init() {
   $("#province").value = S.prov;
   $("#province").addEventListener("change", (e) => setProv(e.target.value));
   document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => setTab(b.dataset.tab)));
+  $("#rptBtn").addEventListener("click", () => setTab("report"));
+  const st = document.createElement("style"); st.textContent = REPORT_CSS; document.head.appendChild(st);
   await refresh();
   // รีเฟรชอัตโนมัติเมื่อกลับมาเปิดแอปหลังผ่านไป 10 นาที
   document.addEventListener("visibilitychange", () => { if (!document.hidden && Date.now() - (S.data?.fetchedAt ?? 0) > 10 * 60e3) refresh(); });

@@ -1,6 +1,6 @@
 // เก็บไฟล์หน้าเว็บไว้ในเครื่อง เปิดได้เร็ว/ออฟไลน์ได้ ส่วนข้อมูลดึงใหม่ก่อนเสมอ
-const CACHE = "twm-v2";
-const SHELL = ["./", "index.html", "style.css", "app.js", "provinces.json", "districts.json", "icon.svg", "manifest.webmanifest"];
+const CACHE = "twm-v3";
+const SHELL = ["./", "index.html", "style.css", "app.js", "report.js", "provinces.json", "districts.json", "icon.svg", "manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

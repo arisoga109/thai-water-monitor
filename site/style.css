@@ -154,3 +154,40 @@ table.t tr.click { cursor: pointer; }
 .dotc { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }
 table.t tr.cur td { font-weight: 700; color: var(--accent); }
 .tools .link-btn { flex: none; }
+
+/* ปุ่มรายงานบนหัว */
+.hright { display: flex; align-items: center; gap: 10px; }
+.hbtn { display: inline-flex; align-items: center; gap: 4px; background: rgba(255,255,255,.16); border: 0; color: #fff; border-radius: 99px; padding: 4px 10px 4px 8px; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.hbtn svg { width: 15px; height: 15px; fill: currentColor; }
+.hbtn[aria-pressed="true"] { background: #fff; color: var(--brand); }
+
+/* ตัวสร้างรายงาน */
+.builder .fld { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+.builder .fld input, .builder .fld textarea, .builder .fld select { display: block; width: 100%; margin-top: 4px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); font: inherit; }
+.builder .checks { display: grid; gap: 2px; }
+.builder .chk { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 14px; }
+.builder .chk input { width: 18px; height: 18px; accent-color: var(--accent); flex: none; }
+.builder .chk.off { opacity: .5; }
+.builder .actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 14px; }
+.btn { border: 1px solid var(--line); background: var(--card); border-radius: 10px; padding: 10px 6px; font-weight: 600; font-size: 14px; cursor: pointer; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn:disabled { opacity: .5; cursor: wait; }
+.paper-wrap { border-radius: 6px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.12), 0 6px 20px rgba(0,0,0,.08); background: #fff; }
+@media (max-width: 600px) {
+  .paper-wrap .report { padding: 0 14px 18px; }
+  .paper-wrap .report .r-head { margin: 0 -14px 14px; padding: 18px 14px 14px; }
+  .paper-wrap .report .kpis { grid-template-columns: repeat(2, 1fr); }
+  .paper-wrap .report table.t { font-size: 11px; }
+}
+
+/* พิมพ์: แสดงเฉพาะรายงาน */
+@media print {
+  @page { size: A4; margin: 12mm 0; }
+  .top, .tabs, .builder, main > h2 { display: none !important; }
+  body { background: #fff !important; padding: 0 !important; }
+  main { max-width: none; padding: 0; }
+  .paper-wrap { box-shadow: none; border-radius: 0; }
+  .report { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .report .rsec h3, .report tr, .report li, .report .kpis, .report svg { break-inside: avoid; }
+  .report h3 { break-after: avoid; }
+}
