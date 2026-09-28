@@ -17,6 +17,7 @@ const FORCE = process.argv.includes("--force");
 const CLIM_YEARS = [2015, 2024];
 const CLIM_PER_RUN = Number(process.env.CLIM_PER_RUN ?? 4); // จังหวัดต่อรอบ
 const CLIM_EVERY_MS = 3 * 3600e3;
+const CLIM_GAP_MS = Number(process.env.CLIM_GAP_MS ?? 35_000);
 const RISK_EVERY_MS = 170 * 60e3;
 const MODELS = ["ecmwf_ifs025", "gfs_seamless", "icon_seamless"];
 
@@ -37,31 +38,12 @@ async function getJson(url) {
 
 await mkdir(OUT, { recursive: true });
 
-// ---------------------------------------------------------------- ค่าปกติ (ทยอยสร้าง)
+// ---------------------------------------------------------------- ค่าปกติเดิม (ใช้คำนวณความเสี่ยงรอบนี้)
 const clim = await readJson(join(PREV, "climatology.json"), null) ?? {
   source: "ERA5 reanalysis (Open-Meteo Archive API)", years: CLIM_YEARS, prov: {}, lastAttempt: 0,
 };
-const pending = provinces.filter((p) => !clim.prov[p.code]);
-if (pending.length && (FORCE || now - (clim.lastAttempt || 0) >= CLIM_EVERY_MS)) {
-  clim.lastAttempt = now;
-  for (const p of pending.slice(0, CLIM_PER_RUN)) {
-    const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${p.lat}&longitude=${p.lon}`
-      + `&start_date=${CLIM_YEARS[0]}-01-01&end_date=${CLIM_YEARS[1]}-12-31&daily=precipitation_sum&models=era5&timezone=Asia%2FBangkok`;
-    try {
-      const d = await getJson(url);
-      clim.prov[p.code] = buildClimatology(d.daily.time, d.daily.precipitation_sum);
-      console.log(`ค่าปกติ: ${p.name} ✓`);
-    } catch (e) {
-      console.error(`ค่าปกติ: ${p.name} ล้มเหลว — ${e.message}`);
-      if (e.status === 429) break; // เกินโควตา รอรอบถัดไป
-    }
-    await sleep(1500);
-  }
-}
 clim.done = Object.keys(clim.prov).length;
 clim.total = provinces.length;
-await writeFile(join(OUT, "climatology.json"), JSON.stringify(clim));
-console.log(`ค่าปกติ: ${clim.done}/${clim.total} จังหวัด`);
 
 // ---------------------------------------------------------------- ความเสี่ยง
 const prevRisk = await readJson(join(PREV, "risk.json"), null);
@@ -71,8 +53,7 @@ const climChanged = prevRisk && prevRisk.climDone !== clim.done;
 if (!FORCE && prevRisk && !climChanged && now - prevRisk.updated < RISK_EVERY_MS) {
   await writeFile(join(OUT, "risk.json"), JSON.stringify(prevRisk));
   console.log("ความเสี่ยง: ใช้ผลรอบก่อน (ยังไม่ครบ 3 ชม.)");
-  process.exit(0);
-}
+} else {
 
 // สถานะแม่น้ำรายจังหวัด
 const river = {};
@@ -88,7 +69,14 @@ try {
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${provinces.map((p) => p.lat).join(",")}`
     + `&longitude=${provinces.map((p) => p.lon).join(",")}&daily=precipitation_sum&models=${MODELS.join(",")}`
     + `&past_days=30&forecast_days=8&timezone=Asia%2FBangkok`;
-  const res = await getJson(url);
+  let res;
+  try { res = await getJson(url); }
+  catch (e) {
+    if (e.status !== 429) throw e;
+    console.log("ความเสี่ยง: โดนจำกัดโควตาชั่วคราว รอ 65 วินาทีแล้วลองใหม่");
+    await sleep(65_000);
+    res = await getJson(url);
+  }
   const arr = Array.isArray(res) ? res : [res];
   const out = { updated: now, climDone: clim.done, climTotal: clim.total, climYears: clim.years, prov: {} };
   provinces.forEach((p, i) => {
@@ -115,3 +103,28 @@ try {
   if (prevRisk) await writeFile(join(OUT, "risk.json"), JSON.stringify({ ...prevRisk, stale: true }));
   process.exitCode = 2;
 }
+}
+
+// ---------------------------------------------------------------- ทยอยสร้างค่าปกติ (ทำหลังคำนวณความเสี่ยง)
+// Open-Meteo จำกัด ~600 หน่วย/นาที และข้อมูล 10 ปีของหนึ่งจุดนับราว 260 หน่วย จึงเว้น 35 วินาทีระหว่างจังหวัด
+const pending = provinces.filter((p) => !clim.prov[p.code]);
+if (pending.length && (FORCE || now - (clim.lastAttempt || 0) >= CLIM_EVERY_MS)) {
+  clim.lastAttempt = now;
+  for (const p of pending.slice(0, CLIM_PER_RUN)) {
+    const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${p.lat}&longitude=${p.lon}`
+      + `&start_date=${CLIM_YEARS[0]}-01-01&end_date=${CLIM_YEARS[1]}-12-31&daily=precipitation_sum&models=era5&timezone=Asia%2FBangkok`;
+    try {
+      const d = await getJson(url);
+      clim.prov[p.code] = buildClimatology(d.daily.time, d.daily.precipitation_sum);
+      console.log(`ค่าปกติ: ${p.name} ✓`);
+    } catch (e) {
+      console.error(`ค่าปกติ: ${p.name} ล้มเหลว — ${e.message}`);
+      if (e.status === 429) break; // เกินโควตา รอรอบถัดไป
+    }
+    await sleep(CLIM_GAP_MS);
+  }
+}
+clim.done = Object.keys(clim.prov).length;
+clim.total = provinces.length;
+await writeFile(join(OUT, "climatology.json"), JSON.stringify(clim));
+console.log(`ค่าปกติ: ${clim.done}/${clim.total} จังหวัด`);
