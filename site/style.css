@@ -16,6 +16,8 @@
   --m1: #0b7fab;  /* ECMWF */
   --m2: #d97706;  /* GFS */
   --m3: #7c3aed;  /* ICON */
+  /* ความแรงฝนรายชั่วโมง (น้ำเงินอ่อน → เข้ม → ม่วง) */
+  --r0: #e7edf1; --r1: #b3dcef; --r2: #4fa8d6; --r3: #1c5fa8; --r4: #6b21a8;
   --radius: 14px;
   color-scheme: light;
 }
@@ -25,6 +27,7 @@
     --brand: #0c3b4f; --accent: #4cc0ea;
     --crit-low: #e0a44a; --low: #ecc94b; --normal: #48bb78; --high: #63b3ed; --over: #fc8181;
     --m1: #4cc0ea; --m2: #f6ad55; --m3: #b794f4;
+    --r0: #1f2c33; --r1: #1f5a78; --r2: #2f8fc4; --r3: #74b9f0; --r4: #d6a3ff;
     color-scheme: dark;
   }
 }
@@ -33,6 +36,7 @@
   --brand: #0c3b4f; --accent: #4cc0ea;
   --crit-low: #e0a44a; --low: #ecc94b; --normal: #48bb78; --high: #63b3ed; --over: #fc8181;
   --m1: #4cc0ea; --m2: #f6ad55; --m3: #b794f4;
+  --r0: #1f2c33; --r1: #1f5a78; --r2: #2f8fc4; --r3: #74b9f0; --r4: #d6a3ff;
   color-scheme: dark;
 }
 
@@ -136,3 +140,17 @@ table.t tr.click { cursor: pointer; }
 .tabs button { flex: 1; background: none; border: 0; font-size: 11.5px; color: var(--muted); display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px 0; cursor: pointer; }
 .tabs svg { width: 22px; height: 22px; fill: currentColor; }
 .tabs button[aria-selected="true"] { color: var(--accent); font-weight: 600; }
+
+/* ตารางฝนรายชั่วโมง */
+.hgrid { display: grid; grid-template-columns: 44px repeat(24, 1fr); gap: 2px; align-items: center; }
+.hgrid .hh { font-size: 10px; color: var(--muted); text-align: left; }
+.hgrid .hd { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.hc { height: 26px; border: 0; padding: 0; border-radius: 3px; background: var(--c, var(--r0)); cursor: pointer; min-width: 0; }
+.hc.past { opacity: .3; }
+.hc.now { outline: 2px solid var(--ink); outline-offset: -1px; }
+.hc.sel { outline: 2px solid var(--over); outline-offset: -1px; }
+.hc.unsure { background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--card) 3px 5px); }
+.unsure-sw { background: var(--r2) repeating-linear-gradient(135deg, transparent 0 3px, var(--card) 3px 5px) !important; }
+.dotc { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }
+table.t tr.cur td { font-weight: 700; color: var(--accent); }
+.tools .link-btn { flex: none; }

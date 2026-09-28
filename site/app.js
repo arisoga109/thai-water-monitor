@@ -22,7 +22,11 @@ const S = {
   damHist: null,
   rainHist: null,
   wxCache: {},
-  point: null,       // จุดที่ใช้พยากรณ์อากาศ (null = กลางจังหวัด)
+  point: null,       // จุดที่ใช้พยากรณ์อากาศ (null = อำเภอที่เลือก / กลางจังหวัด)
+  districts: {},     // { รหัสจังหวัด: [[ชื่ออำเภอ, lat, lon], ...] }
+  dist: store.get("dist", {}), // อำเภอที่เลือกไว้ของแต่ละจังหวัด
+  hsel: null,        // ชั่วโมงที่แตะดูในตารางฝนรายชั่วโมง
+  distWx: {},
   open: null,        // แถวที่กางรายละเอียดอยู่
   q: "", sort: "pct", region: "ทั้งหมด",
 };
@@ -237,7 +241,7 @@ async function viewSummary() {
 
   if (S.prov) {
     // พยากรณ์สั้นๆ ของจังหวัด
-    html += `<h2>ฝนคาดการณ์ 3 วัน</h2><div class="card" id="sum-wx"><div class="loading small">กำลังโหลดพยากรณ์…</div></div>`;
+    html += `<h2>ฝนคาดการณ์ 3 วัน · ${esc(wxPoint().label)}</h2><div class="card" id="sum-wx"><div class="loading small">กำลังโหลดพยากรณ์…</div></div>`;
   } else {
     html += `<h2>จังหวัดที่ควรจับตา</h2><div class="card">${provinceRanking()}</div>`;
   }
@@ -245,8 +249,8 @@ async function viewSummary() {
   $("#view").innerHTML = html;
 
   if (S.prov) {
-    const p = S.provByCode.get(S.prov);
-    getForecast(p.lat, p.lon).then((wx) => {
+    const pt = wxPoint();
+    getForecast(pt.lat, pt.lon).then((wx) => {
       const el = $("#sum-wx"); if (!el) return;
       const a = analyzeForecast(wx);
       el.innerHTML = `<ul class="insights">${a.lines.slice(0, 3).map((l) => `<li style="--sev:var(--${l.key})">${l.text}</li>`).join("")}</ul>
@@ -456,7 +460,7 @@ async function getForecast(lat, lon) {
   if (c && Date.now() - c.at < 30 * 60e3) return c.data;
   const base = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&timezone=Asia%2FBangkok`;
   const [multi, best] = await Promise.all([
-    getJSON(`${base}&daily=precipitation_sum&models=${MODELS.map((m) => m.id).join(",")}&forecast_days=10`, { cache: "default" }),
+    getJSON(`${base}&daily=precipitation_sum&hourly=precipitation&models=${MODELS.map((m) => m.id).join(",")}&forecast_days=10`, { cache: "default" }),
     getJSON(`${base}&daily=precipitation_sum,precipitation_probability_max,temperature_2m_max,temperature_2m_min,wind_speed_10m_max&hourly=precipitation,precipitation_probability&forecast_days=10`, { cache: "default" }),
   ]);
   const data = { multi, best };
@@ -520,42 +524,243 @@ function analyzeFlood(fl) {
   return { idx, pastAvg, now: q[idx], peak, peakDay, ratio };
 }
 
+// ---------------------------------------------------------------- ฝนรายชั่วโมง
+// เกณฑ์ความแรงของฝนรายชั่วโมง (มม./ชม.) อิงเกณฑ์สากล (WMO/AMS)
+const HOUR_CLASSES = [
+  { max: 0.1, label: "ไม่มีฝน", key: "r0" },
+  { max: 2.5, label: "ฝนเล็กน้อย", key: "r1" },
+  { max: 7.5, label: "ฝนปานกลาง", key: "r2" },
+  { max: 20, label: "ฝนหนัก", key: "r3" },
+  { max: Infinity, label: "ฝนหนักมาก", key: "r4" },
+];
+const hourClass = (mm) => HOUR_CLASSES.findIndex((c) => (mm ?? 0) < c.max || c.max === Infinity);
+const hh = (t) => t.slice(11, 16);
+
+/** รวมข้อมูลรายชั่วโมง: ปริมาณฝน (best match), โอกาส, และจำนวนโมเดลที่เห็นว่าฝนตก */
+function hourlyRows({ multi, best }) {
+  const t = best.hourly.time;
+  const mh = multi.hourly || {};
+  return t.map((time, i) => {
+    let agree = 0, n = 0;
+    for (const m of MODELS) {
+      const arr = mh[`precipitation_${m.id}`];
+      if (!arr) continue;
+      // ดูช่วง ±1 ชม. เพราะบางโมเดลให้ข้อมูลทุก 3 ชม. และเวลาฝนเคลื่อนได้
+      const win = [arr[i - 1], arr[i], arr[i + 1]].filter((v) => v !== null && v !== undefined);
+      if (!win.length) continue;
+      n++;
+      if (Math.max(...win) >= 0.5) agree++;
+    }
+    const mm = best.hourly.precipitation[i];
+    return { t: time, ms: Date.parse(time + ":00+07:00"), mm, prob: best.hourly.precipitation_probability?.[i] ?? null, agree, n, cls: hourClass(mm) };
+  });
+}
+
+/** หาช่วงเวลาที่คาดว่าฝนตก (รวมชั่วโมงติดกัน เว้นได้ 1 ชม.) */
+function rainPeriods(rows) {
+  const wet = (r) => r.mm >= 0.5 || (r.agree >= 2 && (r.prob ?? 0) >= 50);
+  const periods = [];
+  let cur = null, gap = 0;
+  for (const r of rows) {
+    if (wet(r)) {
+      if (!cur) cur = { rows: [] };
+      cur.rows.push(r); gap = 0;
+    } else if (cur) {
+      gap++;
+      if (gap > 1) { periods.push(cur); cur = null; gap = 0; }
+    }
+  }
+  if (cur) periods.push(cur);
+  return periods.map((p) => {
+    const rs = p.rows;
+    const peak = rs.reduce((a, b) => ((b.mm ?? 0) > (a.mm ?? 0) ? b : a));
+    return {
+      start: rs[0], end: rs.at(-1), peak,
+      total: sum(rs.map((r) => r.mm)),
+      prob: Math.max(...rs.map((r) => r.prob ?? 0)),
+      agree: Math.max(...rs.map((r) => r.agree)), n: Math.max(...rs.map((r) => r.n)),
+    };
+  }).filter((p) => p.total >= 1 || p.prob >= 50);
+}
+
+function periodText(p) {
+  const endH = String((+p.end.t.slice(11, 13) + 1) % 24).padStart(2, "0") + ":00";
+  const c = HOUR_CLASSES[p.peak.cls];
+  const sure = p.agree >= 2 && p.prob >= 60 ? "ค่อนข้างแน่นอน" : p.agree >= 2 || p.prob >= 50 ? "มีโอกาส" : "ไม่แน่นอน";
+  return {
+    key: ["normal", "accent", "high", "over", "over"][p.peak.cls],
+    html: `<b>${dayLabel(p.start.t.slice(0, 10))} ${hh(p.start.t)}–${endH}</b> · ${c.label}
+      <div class="small muted">หนักสุดราว ${hh(p.peak.t)} น. (~${fmt(p.peak.mm, 1)} มม./ชม.) · รวม ~${fmt(p.total, 1)} มม. · โอกาส ${fmt(p.prob)}% · โมเดลเห็นตรงกัน ${p.agree}/${p.n} → <b>${sure}</b></div>`,
+  };
+}
+
+function hourGrid(rows, days) {
+  const now = Date.now();
+  let html = `<div class="hgrid"><span></span>${Array.from({ length: 24 }, (_, h) => `<span class="hh">${h % 6 === 0 ? h : ""}</span>`).join("")}`;
+  for (const d of days) {
+    html += `<span class="hd">${dayLabel(d)}</span>`;
+    for (let h = 0; h < 24; h++) {
+      const r = rows.find((x) => x.t === `${d}T${String(h).padStart(2, "0")}:00`);
+      if (!r) { html += `<span class="hc"></span>`; continue; }
+      const past = r.ms + HOUR <= now, curr = r.ms <= now && now < r.ms + HOUR;
+      const unsure = r.cls > 0 && r.agree < 2 && (r.prob ?? 0) < 50;
+      html += `<button class="hc ${past ? "past" : ""} ${curr ? "now" : ""} ${unsure ? "unsure" : ""} ${S.hsel === r.t ? "sel" : ""}" style="--c:var(--${HOUR_CLASSES[r.cls].key})" data-hour="${r.t}" aria-label="${r.t}"></button>`;
+    }
+  }
+  html += `</div><div class="legend">${HOUR_CLASSES.map((c) => `<span><i style="background:var(--${c.key})"></i>${c.label}</span>`).join("")}<span><i class="unsure-sw"></i>โมเดลไม่ตรงกัน</span></div>`;
+  return html;
+}
+
+function hourInfo(rows) {
+  const r = rows.find((x) => x.t === S.hsel);
+  if (!r) return `<span class="muted">แตะช่องในตารางเพื่อดูรายละเอียดแต่ละชั่วโมง</span>`;
+  return `<b>${dayLabel(r.t.slice(0, 10))} ${hh(r.t)} น.</b> · ${HOUR_CLASSES[r.cls].label} ~${fmt(r.mm, 1)} มม. · โอกาส ${r.prob ?? "–"}% · โมเดลเห็นว่าฝนตก ${r.agree}/${r.n}`;
+}
+
+// ---------------------------------------------------------------- เทียบทุกอำเภอ
+async function getDistrictForecast(prov) {
+  const c = S.distWx[prov];
+  if (c && Date.now() - c.at < 30 * 60e3) return c.data;
+  const list = S.districts[prov] || [];
+  if (!list.length) return [];
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${list.map((d) => d[1]).join(",")}&longitude=${list.map((d) => d[2]).join(",")}&hourly=precipitation,precipitation_probability&forecast_days=2&timezone=Asia%2FBangkok`;
+  const res = await getJSON(url, { cache: "default" });
+  const arr = Array.isArray(res) ? res : [res];
+  const data = list.map((d, i) => {
+    const h = arr[i]?.hourly;
+    if (!h) return { name: d[0], total: null };
+    const start = h.time.findIndex((t) => Date.parse(t + ":00+07:00") + HOUR > Date.now());
+    const idx = Array.from({ length: 24 }, (_, k) => start + k).filter((k) => k < h.time.length);
+    const mm = idx.map((k) => h.precipitation[k] ?? 0);
+    const peakK = idx[mm.indexOf(Math.max(...mm))];
+    const firstK = idx.find((k) => (h.precipitation[k] ?? 0) >= 0.5);
+    return {
+      name: d[0], total: sum(mm), peak: Math.max(...mm), peakT: h.time[peakK],
+      first: firstK !== undefined ? h.time[firstK] : null,
+      prob: Math.max(...idx.map((k) => h.precipitation_probability?.[k] ?? 0)),
+    };
+  });
+  S.distWx[prov] = { at: Date.now(), data };
+  return data;
+}
+
+function districtTable(data) {
+  const rows = [...data].filter((d) => d.total !== null).sort((a, b) => b.total - a.total);
+  if (!rows.length) return `<div class="empty small">ไม่มีข้อมูล</div>`;
+  return `<table class="t"><thead><tr><th>${S.prov === 10 ? "เขต" : "อำเภอ"}</th><th>ฝนรวม</th><th>เริ่มตก</th><th>หนักสุด</th><th>โอกาส</th></tr></thead><tbody>
+    ${rows.map((d) => {
+      const c = HOUR_CLASSES[hourClass(d.peak)];
+      return `<tr class="click ${d.name === S.dist[S.prov] ? "cur" : ""}" data-dist="${esc(d.name)}"><td>${esc(d.name)}</td><td>${fmt(d.total, 1)}</td><td>${d.first ? `${d.first.slice(0, 10) !== new Date(Date.now() + 7 * HOUR).toISOString().slice(0, 10) ? "พรุ่งนี้ " : ""}${hh(d.first)}` : "–"}</td><td><span class="dotc" style="background:var(--${c.key})"></span>${d.peak >= 0.1 ? hh(d.peakT) : "–"}</td><td>${fmt(d.prob)}%</td></tr>`;
+    }).join("")}
+  </tbody></table><div class="note">24 ชม. ข้างหน้า (มม.) จากโมเดลที่ดีที่สุดของแต่ละพื้นที่ · แตะชื่อเพื่อดูรายชั่วโมง</div>`;
+}
+
+function bindDist() {
+  const el = $("#dist");
+  if (el) el.addEventListener("change", () => selectDist(el.value));
+}
+function selectDist(name) {
+  if (name) S.dist[S.prov] = name; else delete S.dist[S.prov];
+  store.set("dist", S.dist);
+  S.point = null; S.hsel = null;
+  window.scrollTo(0, 0);
+  render();
+}
+function useMyLocation() {
+  if (!navigator.geolocation) return alert("อุปกรณ์นี้ไม่รองรับการระบุตำแหน่ง");
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const lat = pos.coords.latitude, lon = pos.coords.longitude;
+      // หาอำเภอที่ใกล้ที่สุด เพื่อตั้งจังหวัดให้ตรงด้วย
+      let best = null;
+      for (const [pc, list] of Object.entries(S.districts)) for (const d of list) {
+        const dd = (d[1] - lat) ** 2 + ((d[2] - lon) * Math.cos(lat * Math.PI / 180)) ** 2;
+        if (!best || dd < best.dd) best = { pc: +pc, d, dd };
+      }
+      if (best && best.dd < 0.5) {
+        S.prov = best.pc; store.set("prov", S.prov); $("#province").value = S.prov;
+        const pre = best.pc === 10 ? "เขต" : "อ.";
+        S.point = { lat, lon, label: `ตำแหน่งของฉัน (ใกล้${pre}${best.d[0]} ${provName(best.pc)})` };
+      } else S.point = { lat, lon, label: "ตำแหน่งของฉัน" };
+      S.hsel = null; setTab("wx");
+    },
+    () => alert("ไม่สามารถระบุตำแหน่งได้ กรุณาอนุญาตการเข้าถึงตำแหน่งในเบราว์เซอร์"),
+    { enableHighAccuracy: false, timeout: 10000, maximumAge: 600000 },
+  );
+}
+
+function wxPoint() {
+  if (S.point) return S.point;
+  const p = S.prov ? S.provByCode.get(S.prov) : null;
+  if (!p) return null;
+  const dn = S.dist[S.prov];
+  const d = dn && (S.districts[S.prov] || []).find((x) => x[0] === dn);
+  const pre = S.prov === 10 ? "เขต" : "อ.";
+  return d ? { lat: d[1], lon: d[2], label: `${pre}${d[0]} ${p.name}` } : { lat: p.lat, lon: p.lon, label: `กลางจังหวัด${p.name}` };
+}
+
 async function viewWx() {
   const p = S.prov ? S.provByCode.get(S.prov) : null;
-  const pt = S.point ?? (p ? { lat: p.lat, lon: p.lon, label: `กลางจังหวัด${p.name}` } : null);
+  const pt = wxPoint();
   if (!pt) {
-    $("#view").innerHTML = `<div class="card empty">เลือกจังหวัดด้านบน เพื่อดูพยากรณ์ฝนจาก 3 โมเดล<br>และคาดการณ์ปริมาณน้ำท่า</div>`;
+    $("#view").innerHTML = `<div class="card empty">เลือกจังหวัดด้านบน เพื่อดูพยากรณ์ฝนรายชั่วโมง รายอำเภอ<br>จาก 3 โมเดล และคาดการณ์ปริมาณน้ำท่า</div>
+      <div style="text-align:center"><button class="link-btn" data-geo="1">ใช้ตำแหน่งปัจจุบันของฉัน</button></div>`;
     return;
   }
-  $("#view").innerHTML = `<div class="loading">กำลังโหลดพยากรณ์…</div>`;
+  const dists = S.districts[S.prov] || [];
+  const controls = `<div class="tools">
+      <select id="dist" ${S.point ? "disabled" : ""}>
+        <option value="">${p ? `กลางจังหวัด${esc(p.name)}` : "—"}</option>
+        ${dists.map((d) => `<option value="${esc(d[0])}" ${d[0] === S.dist[S.prov] ? "selected" : ""}>${S.prov === 10 ? "เขต" : "อ."}${esc(d[0])}</option>`).join("")}
+      </select>
+      <button class="link-btn" data-geo="1" title="ใช้ตำแหน่งปัจจุบัน">📍 ตำแหน่งฉัน</button>
+    </div>
+    ${S.point ? `<div class="small muted" style="margin-bottom:8px">จุดพยากรณ์: <b>${esc(pt.label)}</b> (${pt.lat.toFixed(2)}, ${pt.lon.toFixed(2)}) · <button class="link-btn" data-point="reset">กลับไปเลือกอำเภอ</button></div>` : ""}`;
+  $("#view").innerHTML = controls + `<div class="loading">กำลังโหลดพยากรณ์…</div>`;
+  bindDist();
   let wx;
   try { wx = await getForecast(pt.lat, pt.lon); } catch {
-    $("#view").innerHTML = `<div class="card empty">โหลดพยากรณ์ไม่สำเร็จ ลองใหม่อีกครั้ง</div>`; return;
+    $("#view").innerHTML = controls + `<div class="card empty">โหลดพยากรณ์ไม่สำเร็จ ลองใหม่อีกครั้ง</div>`; bindDist(); return;
   }
   const a = analyzeForecast(wx);
   const series = MODELS.map((m, i) => ({ name: m.name, values: a.per[i].slice(0, 10), color: m.color }));
   const b = wx.best;
-  const nowIdx = b.hourly.time.findIndex((t) => Date.parse(t + ":00+07:00") >= Date.now() - HOUR);
-  const hrs = b.hourly.time.slice(nowIdx, nowIdx + 48);
+  const rows = hourlyRows(wx);
+  const nowMs = Date.now();
+  const upcoming = rows.filter((r) => r.ms + HOUR > nowMs).slice(0, 72);
+  const periods = rainPeriods(upcoming);
+  const days = [...new Set(upcoming.map((r) => r.t.slice(0, 10)))].slice(0, 3);
+  const next6 = upcoming.slice(0, 6);
+  const n6 = sum(next6.map((r) => r.mm));
+  const nowLine = n6 >= 0.5
+    ? `6 ชม. ข้างหน้า: คาดว่ามีฝน ~${fmt(n6, 1)} มม. หนักสุด${HOUR_CLASSES[Math.max(...next6.map((r) => r.cls))].label.replace("ฝน", "")}`
+    : `6 ชม. ข้างหน้า: ไม่คาดว่าจะมีฝนนัยสำคัญ (โอกาสสูงสุด ${fmt(Math.max(...next6.map((r) => r.prob ?? 0)))}%)`;
 
-  let html = `<div class="small muted" style="margin-bottom:8px">จุดพยากรณ์: <b>${esc(pt.label)}</b> (${pt.lat.toFixed(2)}, ${pt.lon.toFixed(2)})${S.point ? ` · <button class="link-btn" data-point="reset">กลับไปกลางจังหวัด</button>` : ""}</div>
+  let html = controls + `
+    <h2>ช่วงเวลาที่คาดว่าฝนตก (3 วัน)</h2>
+    <div class="card"><ul class="insights">
+      <li style="--sev:var(--${n6 >= 0.5 ? "high" : "normal"})"><b>${nowLine}</b></li>
+      ${periods.length ? periods.slice(0, 8).map((p) => { const t = periodText(p); return `<li style="--sev:var(--${t.key})">${t.html}</li>`; }).join("") : `<li style="--sev:var(--normal)">ไม่คาดว่าจะมีฝนนัยสำคัญใน 3 วันข้างหน้า</li>`}
+    </ul></div>
+    <h2>ฝนรายชั่วโมง</h2>
+    <div class="card">${hourGrid(rows, days)}<div id="hinfo" class="small" style="margin-top:8px">${hourInfo(rows)}</div></div>
+    <h2>ภาพรวม 10 วัน</h2>
     <div class="card"><ul class="insights">${a.lines.map((l) => `<li style="--sev:var(--${l.key})">${l.text}</li>`).join("")}</ul></div>
-    <h2>ฝนรายวัน เทียบ 3 โมเดล</h2>
     <div class="card">${groupedBars({ labels: a.days.slice(0, 10).map((d) => String(+d.slice(8))), series })}${legend(series)}</div>
-    <h2>48 ชั่วโมงข้างหน้า</h2>
-    <div class="card">${lineChart({
-      series: [{ values: b.hourly.precipitation_probability.slice(nowIdx, nowIdx + 48), color: "var(--m1)" }],
-      labels: hrs.map((t) => (t.endsWith("00:00") ? dayLabel(t.slice(0, 10)) : t.endsWith("12:00") ? "12:00" : "")), yMin: 0, unit: "%", fillFirst: true,
-    })}<div class="small muted">โอกาสเกิดฝนรายชั่วโมง · ฝนรวม 48 ชม. ≈ ${fmt(sum(b.hourly.precipitation.slice(nowIdx, nowIdx + 48)), 1)} มม.</div></div>
+    ${p ? `<h2>เทียบทุก${S.prov === 10 ? "เขต" : "อำเภอ"}ใน${esc(p.name)}</h2><div class="card" id="dist-table"><div class="loading small">กำลังโหลด…</div></div>` : ""}
     <h2>อุณหภูมิและลม</h2>
     <div class="card"><table class="t"><thead><tr><th>วัน</th><th>ต่ำ–สูง °C</th><th>ลมสูงสุด กม./ชม.</th><th>โอกาสฝน</th></tr></thead><tbody>
       ${b.daily.time.slice(0, 7).map((d, i) => `<tr><td>${dayLabel(d)}</td><td>${fmt(b.daily.temperature_2m_min[i])}–${fmt(b.daily.temperature_2m_max[i])}</td><td>${fmt(b.daily.wind_speed_10m_max[i])}</td><td>${b.daily.precipitation_probability_max[i] ?? "–"}%</td></tr>`).join("")}
     </tbody></table></div>
     <h2>คาดการณ์ปริมาณน้ำท่า (GloFAS)</h2>
     <div class="card" id="flood"><div class="loading small">กำลังโหลด…</div></div>
-    <div class="note">พยากรณ์จาก Open-Meteo (ECMWF IFS, NOAA GFS, DWD ICON) · ความแม่นยำลดลงตามระยะเวลา: 1–3 วันเชื่อถือได้ดี, เกิน 7 วันใช้ดูแนวโน้ม · เป็นการประเมินเบื้องต้น ควรติดตามประกาศทางการจากกรมอุตุนิยมวิทยา</div>`;
+    <div class="note">พยากรณ์จาก Open-Meteo (ECMWF IFS, NOAA GFS, DWD ICON) · ฝนรายชั่วโมงในเขตร้อนเกิดจากพายุฝนฟ้าคะนองเฉพาะที่ เวลาอาจคลาดได้ 2–3 ชม. และตกไม่ทั่วทั้งอำเภอ ใช้ดูแนวโน้มว่า "ช่วงไหนเสี่ยง" มากกว่าเวลาที่แน่นอน · เกณฑ์ความแรง (มม./ชม.): เล็กน้อย ≤2.5, ปานกลาง ≤7.5, หนัก ≤20, หนักมาก >20 · ควรติดตามประกาศกรมอุตุนิยมวิทยาประกอบ</div>`;
   $("#view").innerHTML = html;
+  bindDist();
+  S._rows = rows;
 
+  if (p) getDistrictForecast(S.prov).then((data) => { const el = $("#dist-table"); if (el) el.innerHTML = districtTable(data); })
+    .catch(() => { const el = $("#dist-table"); if (el) el.innerHTML = `<div class="empty small">โหลดข้อมูลรายอำเภอไม่สำเร็จ</div>`; });
   getFlood(pt.lat, pt.lon).then((fl) => {
     const el = $("#flood"); if (!el) return;
     const f = analyzeFlood(fl);
@@ -601,7 +806,7 @@ async function render() {
 }
 
 function setProv(p) {
-  S.prov = Number(p); S.point = null; S.open = null; S.q = "";
+  S.prov = Number(p); S.point = null; S.open = null; S.q = ""; S.hsel = null;
   store.set("prov", S.prov);
   $("#province").value = S.prov;
   window.scrollTo(0, 0);
@@ -615,8 +820,17 @@ function setTab(t) {
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
 document.addEventListener("click", (e) => {
-  const el = e.target.closest("[data-tab],[data-prov],[data-open],[data-region],[data-point],[data-go]");
+  const el = e.target.closest("[data-tab],[data-prov],[data-open],[data-region],[data-point],[data-go],[data-geo],[data-dist],[data-hour]");
   if (!el) return;
+  if (el.dataset.hour) {
+    S.hsel = el.dataset.hour;
+    document.querySelectorAll(".hc.sel").forEach((c) => c.classList.remove("sel"));
+    el.classList.add("sel");
+    const info = $("#hinfo"); if (info && S._rows) info.innerHTML = hourInfo(S._rows);
+    return;
+  }
+  if (el.dataset.geo) return useMyLocation();
+  if (el.dataset.dist) return selectDist(el.dataset.dist);
   if (el.dataset.tab) return setTab(el.dataset.tab);
   if (el.dataset.go) return setTab(el.dataset.go);
   if (el.dataset.prov) return setProv(el.dataset.prov);
@@ -644,6 +858,7 @@ async function refresh() {
 async function init() {
   S.provinces = await getJSON("provinces.json", { cache: "default" });
   S.provinces.forEach((p) => S.provByCode.set(p.code, p));
+  S.districts = await getJSON("districts.json", { cache: "default" }).catch(() => ({}));
   const sorted = [...S.provinces].sort((a, b) => a.name.localeCompare(b.name, "th"));
   $("#province").innerHTML = `<option value="0">ทั้งประเทศ</option>` + sorted.map((p) => `<option value="${p.code}">${esc(p.name)}</option>`).join("");
   if (!S.provByCode.has(S.prov)) S.prov = 0;
