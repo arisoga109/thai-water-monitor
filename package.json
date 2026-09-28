@@ -1,0 +1,11 @@
+{
+  "name": "thai-water-monitor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fetch": "node scripts/fetch.mjs --prev out/data --out out/data && cp -r site/. out/",
+    "mock": "node scripts/mock.mjs",
+    "serve": "python3 -m http.server 8080 -d out",
+    "test": "node --test test/*.test.mjs"
+  }
+}

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>ติดตามน้ำไทย</title>
+  <meta name="description" content="สรุประดับน้ำแม่น้ำ เขื่อน ฝน และพยากรณ์อากาศรายจังหวัด" />
+  <meta name="theme-color" content="#0f5c7a" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>ติดตามน้ำไทย</h1>
+      <button id="updated" class="updated" type="button" aria-label="สถานะข้อมูล">กำลังโหลด…</button>
+    </div>
+    <label class="prov">
+      <span class="sr">เลือกจังหวัด</span>
+      <select id="province"></select>
+    </label>
+  </header>
+
+  <main id="view" aria-live="polite"></main>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="sum"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4zm0 7h6v-5H4zm10 0h6v-9h-6zm0-16v5h6V4z"/></svg>สรุป</button>
+    <button role="tab" data-tab="river"><svg viewBox="0 0 24 24"><path d="M2 8c3 0 3-2 6-2s3 2 6 2 3-2 6-2v3c-3 0-3 2-6 2s-3-2-6-2-3 2-6 2zm0 7c3 0 3-2 6-2s3 2 6 2 3-2 6-2v3c-3 0-3 2-6 2s-3-2-6-2-3 2-6 2z"/></svg>แม่น้ำ</button>
+    <button role="tab" data-tab="dam"><svg viewBox="0 0 24 24"><path d="M3 20h18v-2H3zm2-4h14L15 4H9zm4.5-2 2.5-7.5 2.5 7.5z"/></svg>เขื่อน</button>
+    <button role="tab" data-tab="rain"><svg viewBox="0 0 24 24"><path d="M6.5 14A4.5 4.5 0 0 1 6 5a6 6 0 0 1 11.5 1.5A3.8 3.8 0 0 1 17 14zM8 16l-1.5 4M12 16l-1.5 4M16 16l-1.5 4" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>ฝน</button>
+    <button role="tab" data-tab="wx"><svg viewBox="0 0 24 24"><path d="M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM11 1h2v3h-2zm0 19h2v3h-2zM1 11h3v2H1zm19 0h3v2h-3zM4.2 5.6l1.4-1.4 2.1 2.1-1.4 1.4zm12.1 12.1 1.4-1.4 2.1 2.1-1.4 1.4zM4.2 18.4l2.1-2.1 1.4 1.4-2.1 2.1zM16.3 6.3l2.1-2.1 1.4 1.4-2.1 2.1z"/></svg>อากาศ</button>
+  </nav>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
