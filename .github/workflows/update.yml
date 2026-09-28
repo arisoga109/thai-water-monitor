@@ -2,8 +2,10 @@ name: อัปเดตข้อมูลน้ำ
 
 on:
   schedule:
-    - cron: "7,37 * * * *" # ทุก 30 นาที (GitHub อาจดีเลย์ได้หลายนาที)
-  workflow_dispatch: {}      # กดรันเองได้จากแท็บ Actions
+    # ทุก 15 นาที เป็นตัวสำรอง — ตัวตั้งเวลาของ GitHub มักดีเลย์หรือข้ามรอบ
+    # ถ้าต้องการให้ตรงเวลา ให้ตั้ง cron-job.org มาสั่งรันแทน (ดู README หัวข้อ "ให้อัปเดตตรงเวลา")
+    - cron: "4,19,34,49 * * * *"
+  workflow_dispatch: {}      # กดรันเองได้จากแท็บ Actions หรือสั่งจาก cron-job.org
   push:
     branches: [main]
 
@@ -37,19 +39,30 @@ jobs:
         continue-on-error: true
         run: node scripts/fetch.mjs --prev prev/data --out out/data
 
+      # ความเสี่ยงจากฝนสะสม (คำนวณใหม่ทุก ~3 ชม.) และทยอยสร้างค่าปกติย้อนหลังจนครบทุกจังหวัด
+      - name: ประเมินความเสี่ยงจากฝน
+        continue-on-error: true
+        run: node scripts/risk.mjs --prev prev/data --out out/data
+
       - name: รวมไฟล์หน้าเว็บ
         run: |
           cp -r site/. out/
           touch out/.nojekyll
           test -f out/data/latest.json || cp -r prev/data/. out/data/
+          for f in climatology.json risk.json; do test -f out/data/$f || cp prev/data/$f out/data/ 2>/dev/null || true; done
 
+      # เผยแพร่ด้วยคำสั่ง git ตรงๆ (ไม่พึ่ง action ภายนอก) — เก็บแค่คอมมิตเดียว repo จะไม่บวม
       - name: เผยแพร่ขึ้น GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./out
-          force_orphan: true # เก็บแค่คอมมิตเดียว repo จะไม่บวมขึ้นเรื่อยๆ
-          commit_message: "อัปเดตข้อมูล"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd out
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "อัปเดตข้อมูล $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" gh-pages
 
       # GitHub จะปิด workflow ตั้งเวลาอัตโนมัติถ้า repo ไม่มีความเคลื่อนไหว 60 วัน
       # ขั้นนี้สั่งเปิดใช้งานซ้ำทุกวันที่ 1 เพื่อไม่ให้ระบบหยุดเงียบๆ
