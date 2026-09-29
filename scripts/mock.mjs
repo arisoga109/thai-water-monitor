@@ -1,6 +1,7 @@
 // สร้างข้อมูลจำลองไว้ลองหน้าเว็บในเครื่อง (ไม่ต้องต่อเน็ต): node scripts/mock.mjs
 import { mkdir, writeFile, readFile, cp } from "node:fs/promises";
 import { buildClimatology, assessRisk } from "../site/risk.js";
+import { findPeriods, packRows } from "../site/alerts.js";
 import { normalizeWaterLevels, normalizeRain, normalizeDams, mergeWaterHistory, mergeDamHistory, mergeRainHistory } from "./lib.mjs";
 
 const OUT = "out/data";
@@ -116,6 +117,24 @@ for (const p of provinces) {
 const partial = Object.fromEntries(Object.entries(climProv).slice(0, 60));
 await writeFile(`${OUT}/climatology.json`, JSON.stringify({ source: "mock", years: [2015, 2024], prov: partial, done: 60, total: 77 }));
 await writeFile(`${OUT}/risk.json`, JSON.stringify({ updated: now, climDone: 60, climTotal: 77, climYears: [2015, 2024], prov: riskProv }));
+
+// ---- เตือนฝนจำลอง: พายุเคลื่อนจากตะวันตกไปตะวันออก เริ่มบ่าย
+const districtsAll = JSON.parse(await readFile(new URL("../site/districts.json", import.meta.url), "utf8"));
+const aDates = [0, 1, 2, 3].map((k) => new Date(now + 7 * 3600e3 + k * 864e5).toISOString().slice(0, 10));
+const aTime = aDates.flatMap((d) => Array.from({ length: 24 }, (_, h) => `${d}T${String(h).padStart(2, "0")}:00`));
+const aRows = [];
+for (const [pc, list] of Object.entries(districtsAll)) list.forEach((d, i) => {
+  const mm = aTime.map((t, k) => {
+    const day = Math.floor(k / 24), hr = k % 24;
+    const onset = 12 + (d[2] - 98) * 1.3 + day * 0.5 + (rnd() - 0.5) * 2;   // ตะวันตกตกก่อน
+    const wet = rnd() < (d[1] < 11 ? 0.8 : 0.55);
+    const x = hr - onset;
+    return wet && x >= 0 && x < 4 ? +(Math.max(0, (4 - x) * (1 + rnd() * 4) * (day === 1 ? 1.8 : 1))).toFixed(1) : 0;
+  });
+  const prob = mm.map((v) => (v > 0 ? 60 + Math.round(rnd() * 35) : 15));
+  aRows.push(...packRows(+pc, i, findPeriods(aTime, mm, prob, now), aDates));
+});
+await writeFile(`${OUT}/alerts.json`, JSON.stringify({ updated: now, dates: aDates, covered: 928, missing: 0, rows: aRows }));
 
 await cp("site", "out", { recursive: true });
 console.log(`ข้อมูลจำลอง: ${wl.length} สถานีระดับน้ำ, ${rain.stations.length} สถานีฝน, ${dams.dams.length} เขื่อน → เปิดโฟลเดอร์ out/`);

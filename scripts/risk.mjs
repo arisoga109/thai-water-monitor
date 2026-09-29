@@ -15,7 +15,7 @@ const OUT = arg("--out", "out/data");
 const FORCE = process.argv.includes("--force");
 
 const CLIM_YEARS = [2015, 2024];
-const CLIM_PER_RUN = Number(process.env.CLIM_PER_RUN ?? 4); // จังหวัดต่อรอบ
+const CLIM_PER_RUN = Number(process.env.CLIM_PER_RUN ?? 2); // จังหวัดต่อรอบ
 const CLIM_EVERY_MS = 3 * 3600e3;
 const CLIM_GAP_MS = Number(process.env.CLIM_GAP_MS ?? 35_000);
 const RISK_EVERY_MS = 170 * 60e3;
@@ -128,3 +128,4 @@ clim.done = Object.keys(clim.prov).length;
 clim.total = provinces.length;
 await writeFile(join(OUT, "climatology.json"), JSON.stringify(clim));
 console.log(`ค่าปกติ: ${clim.done}/${clim.total} จังหวัด`);
+

@@ -3,6 +3,7 @@
 
 import { REPORT_CSS, reportToPng, reportToPdf, deliverFile } from "./report.js";
 import { assessRisk, riskLevel, anomalyLevel, anomalyText, RISK_LEVELS } from "./risk.js";
+import { findPeriods, unpackRow, intensity, LEVEL_LABEL, fmtHour, hourMs } from "./alerts.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -239,6 +240,15 @@ async function summaryData() {
     if (heavy.length) push(`มีฝนหนัก (>35 มม.) ใน <b>${heavy.length}</b> จังหวัด เช่น ${heavy.sort((a, b) => b[1].max - a[1].max).slice(0, 4).map(([p, x]) => `${provName(p)} ${fmt(x.max)} มม.`).join(", ")}`, "high");
     else push("ไม่มีจังหวัดที่ฝนหนักเกิน 35 มม. ใน 24 ชม. ที่ผ่านมา", "normal");
   }
+  if (S.alerts?.rows) {
+    const today = S.alerts.dates[0] === localDates()[0] ? 0 : S.alerts.dates.indexOf(localDates()[0]);
+    const nowH = Math.floor((Date.now() - hourMs(localDates()[0], 0)) / HOUR);
+    const items = S.alerts.rows.filter((r) => r[2] === today && (!S.prov || r[0] === S.prov) && r[4] >= nowH).map((r) => unpackRow(r, S.alerts.dates)).sort((a, b) => a.s - b.s);
+    const next = items.find((x) => x.s > nowH);
+    const heavy = new Set(items.filter((x) => x.lv >= 3).map((x) => `${x.p}-${x.di}`)).size;
+    if (items.length) push(`เตือนฝนวันนี้: ${fmt(new Set(items.map((x) => `${x.p}-${x.di}`)).size)} อำเภอยังมีฝน${heavy ? ` (หนักขึ้นไป ${fmt(heavy)})` : ""}${next ? ` · ถัดไปเริ่มเร็วสุด ${fmtHour(next.s)} น. ที่ ${distPre(next.p)}${esc(distName(next.p, next.di))}${S.prov ? "" : ` จ.${esc(provName(next.p))}`}` : ""} <button class="link-btn" data-go="risk">ดูลำดับทั้งหมด</button>`, heavy ? "high" : "accent");
+    else push("เตือนฝนวันนี้: ไม่คาดว่าจะมีฝนนัยสำคัญในช่วงที่เหลือของวัน", "normal");
+  }
   if (S.risk?.prov) {
     if (S.prov) {
       const r = S.risk.prov[S.prov];
@@ -332,11 +342,151 @@ function riskBanner() {
   const R = S.risk;
   if (!R) return `<div class="card empty">ยังไม่มีผลประเมินความเสี่ยง<br><span class="small">ระบบจะคำนวณในการอัปเดตรอบถัดไป (ทุก ~3 ชม.)</span></div>`;
   let h = `<div class="small muted" style="margin-bottom:8px">ประเมินเมื่อ ${thTime(R.updated)} น. (${ago(R.updated)})${R.stale ? " · ⚠ รอบล่าสุดคำนวณไม่สำเร็จ ใช้ผลเดิม" : ""}</div>`;
-  if (R.climDone < R.climTotal) h += `<div class="banner">กำลังสร้างค่าปกติย้อนหลัง ${R.climDone}/${R.climTotal} จังหวัด (ทยอยดึงเพื่อไม่ให้เกินโควตาฟรี ครบใน 2–3 วัน) · จังหวัดที่ยังไม่มีค่าปกติใช้เกณฑ์ทั่วไปแทน การจัดอันดับ "ผิดปกติ" จะแม่นขึ้นเมื่อครบ</div>`;
+  if (R.climDone < R.climTotal) h += `<div class="banner">กำลังสร้างค่าปกติย้อนหลัง ${R.climDone}/${R.climTotal} จังหวัด (ทยอยดึงเพื่อไม่ให้เกินโควตาฟรี ครบในราว 5 วัน) · จังหวัดที่ยังไม่มีค่าปกติใช้เกณฑ์ทั่วไปแทน การจัดอันดับ "ผิดปกติ" จะแม่นขึ้นเมื่อครบ</div>`;
   return h;
 }
 
+S.rmode = store.get("rmode", "alert");
+const modeSwitch = () => `<div class="seg">${[["alert", "เตือนก่อนฝนตก"], ["accum", "ความเสี่ยงฝนสะสม"]].map(([k, l]) => `<button data-rmode="${k}" aria-pressed="${S.rmode === k}">${l}</button>`).join("")}</div>`;
+
 async function viewRisk() {
+  if (S.rmode === "alert") await viewAlerts();
+  else await viewRiskAccum();
+  if (S.tab === "risk") $("#view").insertAdjacentHTML("afterbegin", modeSwitch());
+}
+
+// ---------------------------------------------------------------- เตือนก่อนฝนตก (รายอำเภอ เรียงตามเวลาที่ฝนเริ่ม)
+S.aDay = 0; S.aLv = 1; S.aGroup = "time"; S.aQ = ""; S.aMore = 0;
+S.liveAlerts = {};
+const localDates = () => [0, 1, 2, 3].map((k) => new Date(Date.now() + 7 * HOUR + k * 864e5).toISOString().slice(0, 10));
+const lvColor = (lv) => ["normal", "r2", "high", "over", "over"][lv];
+const distName = (p, di) => S.districts[p]?.[di]?.[0] ?? "?";
+const distPre = (p) => (+p === 10 ? "เขต" : "อ.");
+
+/** ดึงพยากรณ์สดรายอำเภอของจังหวัดเดียว (เร็วกว่ารอไฟล์ทั้งประเทศ) */
+async function liveProvinceAlerts(prov) {
+  const c = S.liveAlerts[prov];
+  if (c && Date.now() - c.at < 30 * 60e3) return c;
+  const list = S.districts[prov] || [];
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${list.map((d) => d[1]).join(",")}&longitude=${list.map((d) => d[2]).join(",")}&hourly=precipitation,precipitation_probability&forecast_days=4&timezone=Asia%2FBangkok`;
+  const res = await getJSON(url, { cache: "default" });
+  const arr = Array.isArray(res) ? res : [res];
+  const items = [];
+  list.forEach((d, i) => {
+    const h = arr[i]?.hourly;
+    if (!h) return;
+    for (const p of findPeriods(h.time, h.precipitation, h.precipitation_probability)) items.push({ p: prov, di: i, ...p });
+  });
+  S.liveAlerts[prov] = { at: Date.now(), items, live: true };
+  return S.liveAlerts[prov];
+}
+
+async function alertItems() {
+  if (S.prov) {
+    try { return await liveProvinceAlerts(S.prov); } catch { /* ใช้ไฟล์ทั้งประเทศแทน */ }
+  }
+  S.alerts ??= await getJSON("data/alerts.json").catch(() => null);
+  if (!S.alerts) return null;
+  const items = S.alerts.rows.map((r) => unpackRow(r, S.alerts.dates)).filter((x) => hourMs(x.d, x.e) + HOUR > Date.now());
+  return { at: S.alerts.updated, items: S.prov ? items.filter((x) => x.p === S.prov) : items, live: false, stale: S.alerts.stale };
+}
+
+async function viewAlerts() {
+  $("#view").innerHTML = `<div class="loading">กำลังโหลดพยากรณ์รายอำเภอ…</div>`;
+  const src = await alertItems();
+  if (!src) {
+    $("#view").innerHTML = `<div class="card empty">ยังไม่มีข้อมูลเตือนฝนทั้งประเทศ<br><span class="small">ระบบจะคำนวณในการอัปเดตรอบถัดไป หรือเลือกจังหวัดด้านบนเพื่อดึงพยากรณ์สดของจังหวัดนั้น</span></div>`;
+    return;
+  }
+  const dates = localDates();
+  const day = dates[S.aDay];
+  const nowMs = Date.now();
+  const q = S.aQ.trim();
+  const dayAll = src.items.filter((x) => x.d === day);
+  let list = dayAll.filter((x) => x.lv >= S.aLv);
+  if (q) list = list.filter((x) => `${distName(x.p, x.di)} ${provName(x.p)}`.includes(q));
+  list.sort((a, b) => a.s - b.s || b.lv - a.lv || b.pmm - a.pmm);
+  const nowH = S.aDay === 0 ? Math.floor((nowMs - hourMs(day, 0)) / HOUR) : -1;
+  const ongoing = list.filter((x) => x.s <= nowH);
+  const upcoming = list.filter((x) => x.s > nowH);
+
+  const nDist = new Set(dayAll.map((x) => `${x.p}-${x.di}`)).size;
+  const nProv = new Set(dayAll.map((x) => x.p)).size;
+  const nHeavy = new Set(dayAll.filter((x) => x.lv >= 3).map((x) => `${x.p}-${x.di}`)).size;
+  const first = upcoming[0];
+  const dayWord = ["วันนี้", "พรุ่งนี้", dayLabel(dates[2]), dayLabel(dates[3])];
+
+  let h = `<div class="chips">${dates.map((d, i) => `<button class="chip" data-aday="${i}" aria-pressed="${S.aDay === i}">${i < 2 ? `${dayWord[i]} ${+d.slice(8)}` : dayLabel(d)}</button>`).join("")}</div>
+    <div class="chips">${[[1, "ฝนทุกระดับ"], [2, "ปานกลางขึ้นไป"], [3, "หนักขึ้นไป"]].map(([k, l]) => `<button class="chip" data-alv="${k}" aria-pressed="${S.aLv === k}">${l}</button>`).join("")}
+</div>
+    ${S.prov ? "" : `<div class="chips">${[["time", "เรียงตามเวลา (รายอำเภอ)"], ["prov", "รวมรายจังหวัด"]].map(([k, l]) => `<button class="chip" data-agroup="${k}" aria-pressed="${S.aGroup === k}">${l}</button>`).join("")}</div>`}
+    <div class="card"><ul class="insights">
+      <li style="--sev:var(--${nHeavy ? "over" : nDist ? "high" : "normal"})"><b>${dayWord[S.aDay]}</b>: คาดว่าฝนตกใน <b>${fmt(nDist)}</b> ${S.prov === 10 ? "เขต" : "อำเภอ"}${S.prov ? "" : ` · ${fmt(nProv)} จังหวัด`}${nHeavy ? ` · <b class="up">ฝนหนักขึ้นไป ${fmt(nHeavy)}</b>` : ""}</li>
+      ${ongoing.length ? `<li style="--sev:var(--high)">ขณะนี้มีฝนอยู่ใน ${fmt(new Set(ongoing.map((x) => `${x.p}-${x.di}`)).size)} พื้นที่</li>` : ""}
+      ${first ? `<li style="--sev:var(--accent)">ถัดไปเริ่มเร็วสุด <b>${fmtHour(first.s)} น.</b> ที่ ${distPre(first.p)}${esc(distName(first.p, first.di))}${S.prov ? "" : ` จ.${esc(provName(first.p))}`}</li>` : ""}
+    </ul></div>
+    <div class="tools"><input id="aq" type="search" placeholder="ค้นหาอำเภอ/จังหวัด" value="${esc(S.aQ)}"></div>`;
+
+  if (!list.length) h += `<div class="card empty">ไม่คาดว่าจะมีฝน${S.aLv > 1 ? "ในระดับที่เลือก" : ""}${q ? "ในพื้นที่ที่ค้นหา" : ""}</div>`;
+  else if (S.aGroup === "prov" && !S.prov) h += alertByProvince(list, nowH);
+  else h += alertTimeline(ongoing, upcoming);
+
+  h += `<div class="note">${src.live ? `พยากรณ์สดรายอำเภอ (${ago(src.at)})` : `พยากรณ์รายอำเภอทั่วประเทศ คำนวณเมื่อ ${thTime(src.at)} น. (${ago(src.at)}) · อัปเดตทุก 3–6 ชม. · เลือกจังหวัดด้านบนเพื่อดูแบบสด`}${src.stale ? " · ⚠ รอบล่าสุดไม่สำเร็จ" : ""}<br>
+    ใช้จุดกลางของแต่ละอำเภอ · เวลาเริ่มอาจคลาดได้ 1–3 ชม. และฝนฟ้าคะนองอาจตกเพียงบางส่วนของอำเภอ · แตะชื่ออำเภอเพื่อดูรายชั่วโมง</div>`;
+  $("#view").innerHTML = h;
+  const qEl = $("#aq");
+  qEl.addEventListener("input", debounce(() => { S.aQ = qEl.value; S.aMore = 0; viewRisk().then(() => { const e = $("#aq"); e.focus(); e.setSelectionRange(e.value.length, e.value.length); }); }, 300));
+}
+
+function alertRow(x, showProv = !S.prov) {
+  const endH = fmtHour(x.e + 1);
+  return `<div class="row arow" data-adist="${x.p}|${x.di}">
+    <div class="main"><div class="name">${distPre(x.p)}${esc(distName(x.p, x.di))}${showProv ? `<span class="muted small"> · ${esc(provName(x.p))}</span>` : ""}</div>
+      <div class="sub wrap">${fmtHour(x.s)}–${endH}${x.e >= 24 ? " (ข้ามคืน)" : ""} · หนักสุด ${fmtHour(x.pk)} ~${fmt(x.pmm, 1)} มม./ชม. · รวม ${fmt(x.tot, 1)} มม.${x.pr !== null ? ` · โอกาส ${fmt(x.pr)}%` : ""}</div></div>
+    <div class="val"><span class="pill" style="--c:var(--${lvColor(x.lv)})">${LEVEL_LABEL[x.lv].replace("ฝน", "")}</span></div>
+  </div>`;
+}
+
+function alertTimeline(ongoing, upcoming) {
+  const LIMIT = 300 + S.aMore;
+  let h = "", shown = 0;
+  if (ongoing.length) {
+    h += `<h2>กำลังตก / เริ่มแล้ว · ${fmt(ongoing.length)}</h2><div class="card">`;
+    for (const x of ongoing.slice(0, LIMIT)) { h += alertRow(x); shown++; }
+    h += `</div>`;
+  }
+  const groups = new Map();
+  for (const x of upcoming) { if (!groups.has(x.s)) groups.set(x.s, []); groups.get(x.s).push(x); }
+  for (const [s, xs] of groups) {
+    if (shown >= LIMIT) break;
+    h += `<h2 class="hgroup">เริ่ม ${fmtHour(s)} น. <span class="muted small">· ${fmt(xs.length)} พื้นที่</span></h2><div class="card">`;
+    for (const x of xs) { if (shown >= LIMIT) break; h += alertRow(x); shown++; }
+    h += `</div>`;
+  }
+  const total = ongoing.length + upcoming.length;
+  if (shown < total) h += `<button class="btn" style="width:100%;margin-top:8px" data-amore="1">แสดงเพิ่ม (${fmt(total - shown)} รายการ)</button>`;
+  return h;
+}
+
+function alertByProvince(list, nowH) {
+  const m = new Map();
+  for (const x of list) {
+    const g = m.get(x.p) || { p: x.p, s: x.s, lv: 0, dists: new Set(), tot: 0, items: [] };
+    g.s = Math.min(g.s, x.s); g.lv = Math.max(g.lv, x.lv); g.dists.add(x.di); g.tot = Math.max(g.tot, x.tot); g.items.push(x);
+    m.set(x.p, g);
+  }
+  const arr = [...m.values()].sort((a, b) => a.s - b.s || b.lv - a.lv);
+  return `<div class="card">${arr.map((g) => {
+    const names = [...new Set(g.items.sort((a, b) => a.s - b.s).map((x) => distName(x.p, x.di)))];
+    return `<div class="row" data-prov="${g.p}">
+      <div class="main"><div class="name">${esc(provName(g.p))} <span class="muted small">· ${g.s <= nowH ? "เริ่มแล้ว" : `เริ่ม ${fmtHour(g.s)}`}</span></div>
+        <div class="sub wrap">${fmt(g.dists.size)} อำเภอ: ${esc(names.slice(0, 5).join(", "))}${names.length > 5 ? ` และอีก ${names.length - 5}` : ""} · สูงสุดรวม ${fmt(g.tot, 1)} มม.</div></div>
+      <div class="val"><span class="pill" style="--c:var(--${lvColor(g.lv)})">${LEVEL_LABEL[g.lv].replace("ฝน", "")}</span></div>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+async function viewRiskAccum() {
   if (!S.risk) { $("#view").innerHTML = riskBanner(); return; }
   if (S.prov) return viewRiskProvince();
   const all = Object.entries(S.risk.prov).map(([p, r]) => ({ p: +p, ...r }));
@@ -1264,9 +1414,20 @@ function setTab(t) {
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
 document.addEventListener("click", (e) => {
-  const el = e.target.closest("[data-tab],[data-prov],[data-open],[data-region],[data-point],[data-go],[data-geo],[data-dist],[data-hour],[data-rsort]");
+  const el = e.target.closest("[data-tab],[data-prov],[data-open],[data-region],[data-point],[data-go],[data-geo],[data-dist],[data-hour],[data-rsort],[data-rmode],[data-aday],[data-alv],[data-agroup],[data-amore],[data-adist]");
   if (!el) return;
   if (el.dataset.rsort) { S.riskSort = el.dataset.rsort; return render(); }
+  if (el.dataset.rmode) { S.rmode = el.dataset.rmode; store.set("rmode", S.rmode); return render(); }
+  if (el.dataset.aday) { S.aDay = +el.dataset.aday; S.aMore = 0; return render(); }
+  if (el.dataset.alv) { S.aLv = +el.dataset.alv; S.aMore = 0; return render(); }
+  if (el.dataset.agroup) { S.aGroup = el.dataset.agroup; return render(); }
+  if (el.dataset.amore) { S.aMore += 300; const y = window.scrollY; return render().then(() => window.scrollTo(0, y)); }
+  if (el.dataset.adist) {
+    const [p, di] = el.dataset.adist.split("|").map(Number);
+    S.prov = p; store.set("prov", p); $("#province").value = p;
+    S.dist[p] = distName(p, di); store.set("dist", S.dist); S.point = null; S.hsel = null;
+    return setTab("wx");
+  }
   if (el.dataset.hour) {
     S.hsel = el.dataset.hour;
     document.querySelectorAll(".hc.sel").forEach((c) => c.classList.remove("sel"));
@@ -1277,7 +1438,7 @@ document.addEventListener("click", (e) => {
   if (el.dataset.geo) return useMyLocation();
   if (el.dataset.dist) { if (S.tab !== "wx") { S.dist[S.prov] = el.dataset.dist; store.set("dist", S.dist); S.point = null; return setTab("wx"); } return selectDist(el.dataset.dist); }
   if (el.dataset.tab) return setTab(el.dataset.tab);
-  if (el.dataset.go) return setTab(el.dataset.go);
+  if (el.dataset.go) { if (el.dataset.go === "risk") { S.rmode = "alert"; store.set("rmode", "alert"); } return setTab(el.dataset.go); }
   if (el.dataset.prov) return setProv(el.dataset.prov);
   if (el.dataset.region) { S.region = el.dataset.region; return render(); }
   if (el.dataset.point) {
@@ -1294,6 +1455,7 @@ async function refresh() {
     S.data = await getJSON("data/latest.json");
     S.data.fetchedAt = Date.now();
     S.risk = await getJSON("data/risk.json").catch(() => null);
+    S.alerts = await getJSON("data/alerts.json").catch(() => null);
     S.wlHist = {}; S.damHist = null; S.rainHist = null;
   } catch (e) {
     if (!S.data) $("#view").innerHTML = `<div class="card empty">ยังไม่มีข้อมูล<br><span class="small">ถ้าเพิ่งติดตั้ง รอให้ GitHub Actions รันรอบแรกเสร็จ (ประมาณ 1–2 นาที)</span></div>`;
