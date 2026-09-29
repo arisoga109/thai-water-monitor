@@ -207,3 +207,4 @@ details.method summary { cursor: pointer; }
 details.method p { font-size: 13px; margin: 8px 0; }
 .tabs button { min-width: 0; }
 table.t.nowrap td:not(:first-child) { white-space: nowrap; }
+.insights .pline { margin-top: 6px; padding-left: 10px; border-left: 2px solid var(--line); }

@@ -1,5 +1,5 @@
 // เก็บไฟล์หน้าเว็บไว้ในเครื่อง เปิดได้เร็ว/ออฟไลน์ได้ ส่วนข้อมูลดึงใหม่ก่อนเสมอ
-const CACHE = "twm-v4";
+const CACHE = "twm-v5";
 const SHELL = ["./", "index.html", "style.css", "app.js", "report.js", "risk.js", "provinces.json", "districts.json", "icon.svg", "manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {

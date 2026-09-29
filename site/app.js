@@ -799,15 +799,51 @@ function rainPeriods(rows) {
   }).filter((p) => p.total >= 1 || p.prob >= 50);
 }
 
-function periodText(p) {
+function periodLine(p) {
   const endH = String((+p.end.t.slice(11, 13) + 1) % 24).padStart(2, "0") + ":00";
   const c = HOUR_CLASSES[p.peak.cls];
   const sure = p.agree >= 2 && p.prob >= 60 ? "ค่อนข้างแน่นอน" : p.agree >= 2 || p.prob >= 50 ? "มีโอกาส" : "ไม่แน่นอน";
-  return {
-    key: ["normal", "accent", "high", "over", "over"][p.peak.cls],
-    html: `<b>${dayLabel(p.start.t.slice(0, 10))} ${hh(p.start.t)}–${endH}</b> · ${c.label}
-      <div class="small muted">หนักสุดราว ${hh(p.peak.t)} น. (~${fmt(p.peak.mm, 1)} มม./ชม.) · รวม ~${fmt(p.total, 1)} มม. · โอกาส ${fmt(p.prob)}% · โมเดลเห็นตรงกัน ${p.agree}/${p.n} → <b>${sure}</b></div>`,
-  };
+  const cross = p.end.t.slice(0, 10) !== p.start.t.slice(0, 10) ? " (ข้ามคืน)" : "";
+  return `<div class="pline"><b>${hh(p.start.t)}–${endH}${cross}</b> · ${c.label}
+    <div class="small muted">หนักสุดราว ${hh(p.peak.t)} น. (~${fmt(p.peak.mm, 1)} มม./ชม.) · รวม ~${fmt(p.total, 1)} มม. · โอกาส ${fmt(p.prob)}% · โมเดลเห็นตรงกัน ${p.agree}/${p.n} → <b>${sure}</b></div></div>`;
+}
+
+const localIso = (ms) => new Date(ms + 7 * HOUR).toISOString().slice(0, 10);
+function dayName(iso, nowMs) {
+  const t = localIso(nowMs), tm = localIso(nowMs + 864e5);
+  return iso === t ? `วันนี้ (${dayLabel(iso)})` : iso === tm ? `พรุ่งนี้ (${dayLabel(iso)})` : dayLabel(iso);
+}
+
+/** แผนฝนรายวัน: วันนี้ที่เหลือ + 3 วันข้างหน้า แสดงครบทุกวัน แม้วันที่ไม่มีฝน */
+function rainPlan(rows, nowMs = Date.now()) {
+  const dates = [0, 1, 2, 3].map((k) => localIso(nowMs + k * 864e5));
+  const upcoming = rows.filter((r) => r.ms + HOUR > nowMs && r.t.slice(0, 10) <= dates[3]);
+  const periods = rainPeriods(upcoming);
+  const next6 = upcoming.slice(0, 6);
+  const n6 = sum(next6.map((r) => r.mm));
+  const p6 = Math.max(0, ...next6.map((r) => r.prob ?? 0));
+  const items = [];
+  if (n6 >= 0.5) items.push({ key: "high", html: `<b>6 ชม. ข้างหน้า: คาดว่ามีฝน ~${fmt(n6, 1)} มม.</b> หนักสุดระดับ${HOUR_CLASSES[Math.max(...next6.map((r) => r.cls))].label}` });
+  else if (p6 >= 50) items.push({ key: "accent", html: `<b>6 ชม. ข้างหน้า: อาจมีฝนปรอยๆ</b><div class="small muted">โอกาสเกิดฝน ${fmt(p6)}% แต่ปริมาณรวมคาดว่าน้อยกว่า 0.5 มม. (โอกาส = มีฝนตกได้แม้เพียงเล็กน้อย)</div>` });
+  else items.push({ key: "normal", html: `<b>6 ชม. ข้างหน้า: ไม่คาดว่าจะมีฝน</b> (โอกาสสูงสุด ${fmt(p6)}%)` });
+  for (const d of dates) {
+    const dayRows = upcoming.filter((r) => r.t.startsWith(d));
+    if (!dayRows.length) continue;
+    const ps = periods.filter((p) => p.start.t.startsWith(d));
+    const name = dayName(d, nowMs);
+    if (!ps.length) {
+      const mp = Math.max(0, ...dayRows.map((r) => r.prob ?? 0));
+      items.push({ key: "normal", html: `<b>${name}</b> · ไม่คาดว่าจะมีฝน${mp >= 40 ? `<div class="small muted">โอกาสสูงสุด ${fmt(mp)}% แต่ปริมาณน้อยมาก อาจมีฝนปรอยๆ บางช่วง</div>` : ""}` });
+      continue;
+    }
+    const worst = Math.max(...ps.map((p) => p.peak.cls));
+    const tot = sum(ps.map((p) => p.total));
+    items.push({
+      key: ["normal", "accent", "high", "over", "over"][worst],
+      html: `<b>${name}</b> · ${HOUR_CLASSES[worst].label} รวม ~${fmt(tot, 1)} มม.${ps.length > 1 ? ` (${ps.length} ช่วง)` : ""}${ps.map(periodLine).join("")}`,
+    });
+  }
+  return items.map((i) => `<li style="--sev:var(--${i.key})">${i.html}</li>`).join("");
 }
 
 function hourGrid(rows, days) {
@@ -944,20 +980,10 @@ async function viewWx() {
   const rows = hourlyRows(wx);
   const nowMs = Date.now();
   const upcoming = rows.filter((r) => r.ms + HOUR > nowMs).slice(0, 72);
-  const periods = rainPeriods(upcoming);
-  const days = [...new Set(upcoming.map((r) => r.t.slice(0, 10)))].slice(0, 3);
-  const next6 = upcoming.slice(0, 6);
-  const n6 = sum(next6.map((r) => r.mm));
-  const nowLine = n6 >= 0.5
-    ? `6 ชม. ข้างหน้า: คาดว่ามีฝน ~${fmt(n6, 1)} มม. หนักสุด${HOUR_CLASSES[Math.max(...next6.map((r) => r.cls))].label.replace("ฝน", "")}`
-    : `6 ชม. ข้างหน้า: ไม่คาดว่าจะมีฝนนัยสำคัญ (โอกาสสูงสุด ${fmt(Math.max(...next6.map((r) => r.prob ?? 0)))}%)`;
-
+  const days = [0, 1, 2, 3].map((k) => localIso(nowMs + k * 864e5));
   let html = controls + `
-    <h2>ช่วงเวลาที่คาดว่าฝนตก (3 วัน)</h2>
-    <div class="card"><ul class="insights">
-      <li style="--sev:var(--${n6 >= 0.5 ? "high" : "normal"})"><b>${nowLine}</b></li>
-      ${periods.length ? periods.slice(0, 8).map((p) => { const t = periodText(p); return `<li style="--sev:var(--${t.key})">${t.html}</li>`; }).join("") : `<li style="--sev:var(--normal)">ไม่คาดว่าจะมีฝนนัยสำคัญใน 3 วันข้างหน้า</li>`}
-    </ul></div>
+    <h2>ช่วงเวลาที่คาดว่าฝนตก (วันนี้ + 3 วัน)</h2>
+    <div class="card"><ul class="insights">${rainPlan(rows, nowMs)}</ul></div>
     <h2>ฝนรายชั่วโมง</h2>
     <div class="card">${hourGrid(rows, days)}<div id="hinfo" class="small" style="margin-top:8px">${hourInfo(rows)}</div></div>
     <h2>ภาพรวม 10 วัน</h2>
@@ -1148,9 +1174,7 @@ async function buildReportHtml() {
     try {
       const wx = await getForecast(pt.lat, pt.lon);
       if (secOn("fc")) {
-        const upcoming = hourlyRows(wx).filter((r) => r.ms + HOUR > now).slice(0, 72);
-        const ps = rainPeriods(upcoming);
-        h += sec(`พยากรณ์ช่วงเวลาที่ฝนจะตก 3 วัน · ${esc(pt.label)}`, `<ul class="insights">${ps.length ? ps.slice(0, 8).map((p) => { const t = periodText(p); return `<li style="--sev:var(--${t.key})">${t.html}</li>`; }).join("") : `<li style="--sev:var(--normal)">ไม่คาดว่าจะมีฝนนัยสำคัญใน 3 วันข้างหน้า</li>`}</ul>
+        h += sec(`พยากรณ์ช่วงเวลาที่ฝนจะตก (วันนี้ + 3 วัน) · ${esc(pt.label)}`, `<ul class="insights">${rainPlan(hourlyRows(wx), now)}</ul>
           <div class="note">เวลาอาจคลาดได้ 2–3 ชม. · ความแรงต่อชั่วโมง: เล็กน้อย ≤2.5 · ปานกลาง ≤7.5 · หนัก ≤20 · หนักมาก >20 มม.</div>`);
       }
       if (secOn("fc10")) {

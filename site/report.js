@@ -51,6 +51,7 @@ export const REPORT_CSS = `
 .report .chart-legend { display:flex; gap:12px; flex-wrap:wrap; font-size:11px; color:var(--muted); margin-top:4px; }
 .report .chart-legend i { display:inline-block; width:12px; height:3px; border-radius:2px; margin-right:5px; vertical-align:3px; }
 .report .note, .report .r-note { font-size:11px; color:var(--muted); margin-top:6px; }
+.report .insights .pline { margin-top:4px; padding-left:8px; border-left:2px solid var(--line); }
 .report .r-usernote { white-space:pre-wrap; border-left:3px solid var(--accent); background:#f3f8fb; padding:8px 12px; border-radius:0 8px 8px 0; }
 .report .empty { color:var(--muted); padding:8px 0; }
 .report .r-foot { border-top:1px solid var(--line); padding-top:8px; font-size:10.5px; color:var(--muted); }
