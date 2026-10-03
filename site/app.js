@@ -641,6 +641,7 @@ async function districtRisk(prov) {
 
 // ---------------------------------------------------------------- แท็บ: แม่น้ำ
 async function viewRiver() {
+  if (!S.data.wl?.length) { $("#view").innerHTML = emptySource("wl", "ยังไม่มีข้อมูลระดับน้ำแม่น้ำ"); return; }
   const hist = S.prov ? await loadWlHist(S.prov) : null;
   let list = rivers().map((s) => ({ ...s, d24: hist ? wlChange(hist, s, 24) : null, dPrev: s.msl !== null && s.prev !== null ? s.msl - s.prev : null }));
   const q = S.q.trim();
@@ -649,7 +650,8 @@ async function viewRiver() {
   list.sort(key ? (a, b) => key(a) - key(b) : (a, b) => a.n.localeCompare(b.n, "th"));
 
   const shown = list.slice(0, 150);
-  let html = `<div class="tools">
+  const wlIss = sourceIssues("wl");
+  let html = (wlIss.length ? `<div class="banner">${wlIss.join("<br>")}</div>` : "") + `<div class="tools">
       <input id="q" type="search" placeholder="ค้นหาสถานี อำเภอ ลุ่มน้ำ" value="${esc(S.q)}" />
       <select id="sort"><option value="pct">ระดับน้ำสูงสุด</option><option value="rise">เพิ่มขึ้นเร็วสุด</option><option value="name">ชื่อสถานี</option></select>
     </div>
@@ -707,13 +709,15 @@ function damChange(hist, d, days) {
 }
 
 async function viewDam() {
+  if (!S.data.dams?.dams?.length) { $("#view").innerHTML = emptySource("dams", "ยังไม่มีข้อมูลเขื่อน"); return; }
   const hist = await loadDamHist();
   let list = dams();
   const regions = ["ทั้งหมด", ...new Set((S.data.dams.dams).map((d) => d.rg))];
   if (!S.prov && S.region !== "ทั้งหมด") list = list.filter((d) => d.rg === S.region);
   list.sort((a, b) => b.pct - a.pct);
 
-  let html = "";
+  const dIss = sourceIssues("dams");
+  let html = dIss.length ? `<div class="banner">${dIss.join("<br>")}</div>` : "";
   if (!S.prov) html += `<div class="chips">${regions.map((r) => `<button class="chip" data-region="${esc(r)}" aria-pressed="${r === S.region}">${esc(r)}</button>`).join("")}</div>`;
   if (!list.length) {
     html += `<div class="card empty">ไม่มีเขื่อนขนาดใหญ่ของกรมชลประทานใน${esc(provName(S.prov))}<br><span class="small">(ข้อมูลครอบคลุมเขื่อนขนาดใหญ่ 35 แห่ง)</span></div>`;
@@ -1372,11 +1376,22 @@ async function exportReport(kind) {
 }
 
 // ---------------------------------------------------------------- โครงหน้า
+/** ข้อความอธิบายแหล่งข้อมูลที่มีปัญหา (ใช้ทั้งหน้าสรุปและหน้าที่ไม่มีข้อมูล) */
+function sourceIssues(only) {
+  const st = S.data?.status ?? {};
+  const names = { wl: "ระดับน้ำแม่น้ำ (ThaiWater)", rain: "ฝน (ThaiWater)", dams: "เขื่อน (กรมชลประทาน)" };
+  return Object.entries(st).filter(([k, v]) => !v.ok && (!only || k === only)).map(([k, v]) =>
+    v.backup ? `${names[k]} ไม่ตอบ — ใช้${v.backup}แทน` : `${names[k]} ไม่ตอบรอบล่าสุด — แสดงข้อมูลเมื่อ ${v.at ? ago(v.at) : "รอบก่อน"}${v.error && /ผิดปกติ/.test(v.error) ? ` (${esc(v.error.replace("ข้อมูลผิดปกติ: ", ""))})` : ""}`);
+}
+function emptySource(key, what) {
+  const iss = sourceIssues(key);
+  return `<div class="card empty">${what}<br><span class="small">${iss.length ? iss.join("<br>") + "<br>ระบบจะลองใหม่ทุกรอบอัปเดต (~15 นาที)" : "ยังไม่มีข้อมูลจากแหล่งต้นทาง"}</span></div>`;
+}
+
 function statusNote() {
   const st = S.data?.status ?? {};
   const names = { wl: "ระดับน้ำ", rain: "ฝน", dams: "เขื่อน" };
-  const bad = Object.entries(st).filter(([, v]) => !v.ok);
-  return `<div class="note">${bad.length ? `⚠︎ รอบล่าสุดดึงข้อมูล${bad.map(([k, v]) => `${names[k]} (ข้อมูลเมื่อ ${ago(v.at)})`).join(", ")}ไม่สำเร็จ ใช้ข้อมูลรอบก่อนแทน · ` : ""}ที่มา: คลังข้อมูลน้ำแห่งชาติ (สสน.), กรมชลประทาน, Open-Meteo</div>`;
+  return `<div class="note">${sourceIssues().map((t) => `⚠︎ ${t}<br>`).join("")}ที่มา: คลังข้อมูลน้ำแห่งชาติ (สสน.), กรมชลประทาน, Open-Meteo</div>`;
 }
 
 function renderHeader() {

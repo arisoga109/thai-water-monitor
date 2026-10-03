@@ -203,3 +203,52 @@ export function mergeRainHistory(hist, byProv, now = Date.now(), keepDays = 120)
   for (const d of dates.slice(0, Math.max(0, dates.length - keepDays))) delete hist[d];
   return hist;
 }
+
+// ---------------------------------------------------------------- แหล่งสำรอง: สถานีวัดน้ำของกรมชลประทาน (ผ่าน GIS ของ ปภ.)
+/** แปลง GeoJSON จาก DPM_RUNOFF_STATION_RID_DSS ให้อยู่ในรูปแบบเดียวกับ ThaiWater (ข้อมูลรายวัน) */
+export function normalizeDpmRiver(features, now = Date.now(), maxAgeH = 60) {
+  const out = [];
+  for (const f of features || []) {
+    const pr = f.properties || {};
+    const g = f.geometry?.coordinates;
+    const c = coords(g?.[1] ?? pr.LAT, g?.[0] ?? pr.LNG);
+    const dt = typeof pr.DATA_DT === "number" ? pr.DATA_DT : parseThaiTime(String(pr.DATA_DT ?? "").replace(" 00:00:00", ""));
+    if (!c || !dt || now - dt > maxAgeH * HOUR) continue;
+    const msl = num(pr.WATER_LEVEL_MSL), bankLv = num(pr.BANK_LEVEL);
+    out.push({
+      id: `rid-${pr.STATION_CODE ?? pr.STATION_ID}`,
+      n: (pr.STATION_DISPLAY_NAME || pr.STATION_CODE || "สถานีกรมชลประทาน").trim(),
+      p: provinceCode(pr.PROV_NAM_T),
+      a: pr.AMP_NAM_T ? String(pr.AMP_NAM_T).trim() : null,
+      b: null,
+      ag: "ชป.",
+      lat: c[0], lon: c[1],
+      msl, prev: null,
+      pct: num(pr.PERCENT_CAPACITY, 1),
+      bank: msl !== null && bankLv !== null ? Math.round((msl - bankLv) * 100) / 100 : null,
+      q: num(pr.CAPACITY_TODAY, 1),
+      lv: pr.WATER_STORAGE_LEVEL_ID ?? null,
+      t: dt,
+      src: "rid",
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- ตรวจความสมเหตุสมผลของข้อมูล
+// ต้นทางบางครั้งตอบ 200 แต่ข้อมูลว่าง/ไม่ครบ (เช่น ช่วงเช้าก่อนกรมชลประทานอัปเดต) — ห้ามเอาไปทับข้อมูลดี
+export function validate(key, data) {
+  if (key === "wl") {
+    if (!data || data.length < 100) return `สถานีระดับน้ำน้อยผิดปกติ (${data?.length ?? 0})`;
+    if (data.filter((s) => s.pct !== null).length < 50) return "สถานีส่วนใหญ่ไม่มีค่าระดับน้ำ";
+  }
+  if (key === "rain") {
+    if (!data || Object.keys(data.byProv || {}).length < 30) return `มีข้อมูลฝนเพียง ${Object.keys(data?.byProv || {}).length} จังหวัด`;
+  }
+  if (key === "dams") {
+    const n = data?.dams?.length ?? 0;
+    if (n < 20) return `เขื่อนน้อยผิดปกติ (${n})`;
+    if (data.dams.filter((d) => d.pct !== null && d.v !== null).length < 20) return "เขื่อนส่วนใหญ่ยังไม่มีค่าของวันนี้";
+  }
+  return null;
+}

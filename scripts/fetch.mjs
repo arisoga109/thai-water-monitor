@@ -3,7 +3,7 @@
 import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  normalizeWaterLevels, normalizeRain, normalizeDams,
+  normalizeWaterLevels, normalizeRain, normalizeDams, normalizeDpmRiver, validate,
   mergeWaterHistory, mergeDamHistory, mergeRainHistory,
 } from "./lib.mjs";
 
@@ -13,6 +13,8 @@ const SOURCES = {
   rain: `${TW}/rain_24h`,
   dams: "https://app.rid.go.th/reservoir/api/dam/public",
 };
+// แหล่งสำรองของระดับน้ำ: สถานีกรมชลประทาน (รายวัน) ผ่าน GIS ของกรมป้องกันและบรรเทาสาธารณภัย
+const DPM_RIVER = "https://gis-portal.disaster.go.th/arcgis/rest/services/Map115_Dynamic/DPM_RUNOFF_STATION_RID_DSS/FeatureServer/0/query";
 
 const arg = (k, d) => {
   const i = process.argv.indexOf(k);
@@ -54,21 +56,49 @@ const status = {};
 async function load(key, normalize) {
   try {
     const data = normalize(await getJson(SOURCES[key]));
-    status[key] = { ok: true, at: now };
+    const bad = validate(key, data);
+    if (bad) throw new Error(`ข้อมูลผิดปกติ: ${bad}`);
+    status[key] = { ok: true, at: now, n: key === "dams" ? data.dams.length : key === "rain" ? Object.keys(data.byProv).length : data.length };
     return data;
   } catch (e) {
     console.error(`[${key}] ล้มเหลว:`, e.message);
-    // ใช้ข้อมูลรอบก่อนแทน และบอกหน้าเว็บว่าเป็นข้อมูลเก่า
+    // ใช้ข้อมูลรอบก่อนแทน และบอกหน้าเว็บว่าเป็นข้อมูลเก่า (เก็บเวลาที่ได้ข้อมูลดีครั้งล่าสุดไว้)
     status[key] = { ok: false, at: prevLatest.status?.[key]?.at ?? null, error: e.message };
     return null;
   }
 }
 
-const [wl, rain, dams] = await Promise.all([
+async function loadDpmRiver() {
+  const features = [];
+  for (let offset = 0; offset < 10000; offset += 1000) {
+    const q = new URLSearchParams({ where: "1=1", outFields: "*", returnGeometry: "true", outSR: "4326", f: "geojson", resultOffset: String(offset), resultRecordCount: "1000" });
+    const page = await getJson(`${DPM_RIVER}?${q}`);
+    const batch = page.features || [];
+    features.push(...batch);
+    const more = page.exceededTransferLimit || page.properties?.exceededTransferLimit;
+    if (!batch.length || !more) break;
+  }
+  return normalizeDpmRiver(features, now);
+}
+
+const [wlMain, rain, dams] = await Promise.all([
   load("wl", (p) => normalizeWaterLevels(p, now)),
   load("rain", (p) => normalizeRain(p, now)),
   load("dams", normalizeDams),
 ]);
+
+// ระดับน้ำ: ถ้า ThaiWater ใช้ไม่ได้ ลองแหล่งสำรองก่อนใช้ข้อมูลรอบก่อน
+let wl = wlMain;
+if (!wl) {
+  try {
+    const backup = await loadDpmRiver();
+    if (backup.length >= 100) {
+      wl = backup;
+      status.wl = { ...status.wl, backup: "สถานีกรมชลประทาน (รายวัน)", backupAt: now, n: backup.length };
+      console.log(`[wl] ใช้แหล่งสำรอง: ${backup.length} สถานี`);
+    } else console.error(`[wl] แหล่งสำรองมีเพียง ${backup.length} สถานี`);
+  } catch (e) { console.error("[wl] แหล่งสำรองล้มเหลว:", e.message); }
+}
 
 const latest = {
   updated: now,
@@ -87,7 +117,7 @@ try {
     if (f.endsWith(".json")) wlHist[f.slice(0, -5)] = await readJson(join(PREV, "wl", f), {});
   }
 } catch { /* รอบแรกยังไม่มีประวัติ */ }
-if (wl) mergeWaterHistory(wlHist, wl, now);
+if (wlMain) mergeWaterHistory(wlHist, wlMain, now); // ไม่ปนข้อมูลสำรองลงประวัติ (คนละชุดสถานี)
 
 const damHist = await readJson(join(PREV, "dams-history.json"), {});
 if (dams) mergeDamHistory(damHist, dams);

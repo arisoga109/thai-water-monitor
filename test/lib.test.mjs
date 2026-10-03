@@ -85,3 +85,29 @@ test("ประวัติเขื่อนและฝน", () => {
   const rh = mergeRainHistory({}, { 10: { avg: 1, max: 2, wet: 1, n: 3 } }, NOW);
   assert.deepEqual(rh["2026-09-27"], { 10: [1, 2, 1, 3] });
 });
+
+import { validate, normalizeDpmRiver } from "../scripts/lib.mjs";
+
+test("ตรวจข้อมูลผิดปกติ: ว่าง/ไม่ครบ ต้องไม่ผ่าน", () => {
+  assert.match(validate("wl", []), /น้อยผิดปกติ/);
+  assert.match(validate("dams", { date: "2026-10-03", dams: [] }), /น้อยผิดปกติ/);
+  const nullDams = { dams: Array.from({ length: 35 }, () => ({ pct: null, v: null })) };
+  assert.match(validate("dams", nullDams), /ยังไม่มีค่า/);
+  const okDams = { dams: Array.from({ length: 35 }, () => ({ pct: 50, v: 10 })) };
+  assert.equal(validate("dams", okDams), null);
+  assert.match(validate("rain", { byProv: { 10: {} } }), /1 จังหวัด/);
+});
+
+test("แหล่งสำรอง: สถานีกรมชลประทานจาก GIS ปภ.", () => {
+  const now = Date.parse("2026-10-03T08:00:00+07:00");
+  const out = normalizeDpmRiver([
+    { geometry: { type: "Point", coordinates: [98.372391, 17.78546] }, properties: { STATION_ID: 2, STATION_CODE: "P.64", DATA_DT: "2026-10-03 00:00:00", PERCENT_CAPACITY: 4.056, WATER_LEVEL_MSL: 276.33, BANK_LEVEL: 278.4, CAPACITY_TODAY: 14.6, STATION_DISPLAY_NAME: "บ้านหลวง (P.64)", PROV_NAM_T: "เชียงใหม่" } },
+    { geometry: null, properties: { STATION_ID: 1, DATA_DT: "2026-10-03 00:00:00" } },
+    { geometry: { coordinates: [100, 15] }, properties: { STATION_ID: 3, DATA_DT: "2026-09-28 00:00:00", PROV_NAM_T: "ลพบุรี" } },
+  ], now);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].p, 50);
+  assert.equal(out[0].pct, 4.1);
+  assert.equal(out[0].bank, -2.07);
+  assert.equal(out[0].n, "บ้านหลวง (P.64)");
+});
